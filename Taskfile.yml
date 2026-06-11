@@ -1,0 +1,22 @@
+version: '3'
+
+tasks:
+  install:
+    cmds:
+      - npm install
+
+  typecheck:
+    cmds:
+      - npm run typecheck
+
+  test:
+    cmds:
+      - npm test
+
+  build:
+    cmds:
+      - npm run build
+
+  verify:
+    cmds:
+      - npm run verify

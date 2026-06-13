@@ -31,7 +31,7 @@ jobs:
             echo "Tag $TAG is not a numeric SemVer release tag like 0.1.0"
             exit 1
           fi
-          npm version --no-git-tag-version "$TAG"
+          npm version --no-git-tag-version --allow-same-version "$TAG"
 
       - run: npm run verify
 

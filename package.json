@@ -21,10 +21,6 @@
       "import": "./dist/src/index.js",
       "types": "./dist/src/index.d.ts"
     },
-    "./ahp-server": {
-      "import": "./dist/src/ahp-server.js",
-      "types": "./dist/src/ahp-server.d.ts"
-    },
     "./nats": {
       "import": "./dist/src/nats.js",
       "types": "./dist/src/nats.d.ts"
@@ -44,14 +40,10 @@
     "zod": "^3.25.0"
   },
   "peerDependencies": {
-    "@wyrd-company/a2a-nats": "^0.1.0",
-    "@wyrd-company/ahp-server": "^0.1.0"
+    "@wyrd-company/a2a-nats": "^0.1.0"
   },
   "peerDependenciesMeta": {
     "@wyrd-company/a2a-nats": {
-      "optional": true
-    },
-    "@wyrd-company/ahp-server": {
       "optional": true
     }
   },
@@ -61,6 +53,9 @@
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   },
   "engines": {
     "node": ">=20"

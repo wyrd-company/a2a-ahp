@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import type { StateAction } from '@microsoft/agent-host-protocol';
 
-import { TaskProjector } from '../src/index.js';
+import { InMemoryA2aTaskStore, TaskProjector } from '../src/index.js';
 
 test('projects AHP response delta and completion into A2A task state', () => {
   const projector = new TaskProjector();
@@ -52,4 +52,40 @@ test('projects AHP error and cancellation into terminal A2A states', () => {
 
   assert.equal(failed.task.status.state, 'failed');
   assert.equal(canceled.task.status.state, 'canceled');
+});
+
+test('persists and hydrates task projection records through the task store', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const writer = new TaskProjector({ store, streamHistoryLimit: 2 });
+  const record = writer.ensureTask({
+    taskId: 'task-store-1',
+    contextId: 'ctx-store-1',
+    route: { provider: 'provider-a', model: { id: 'model-a' } },
+  });
+
+  writer.projectAction(record.correlation.sessionUri, {
+    type: 'session/responsePart',
+    turnId: 'turn-1',
+    part: { kind: 'markdown', id: 'part-1', content: '' },
+  } as StateAction);
+  writer.projectAction(record.correlation.sessionUri, {
+    type: 'session/delta',
+    turnId: 'turn-1',
+    partId: 'part-1',
+    content: 'stored text',
+  } as StateAction);
+  await writer.save(record);
+
+  const reader = new TaskProjector({ store });
+  const loaded = await reader.loadByTaskId('task-store-1');
+
+  assert.ok(loaded);
+  assert.equal(loaded.task.id, 'task-store-1');
+  assert.equal(loaded.correlation.contextId, 'ctx-store-1');
+  assert.equal(loaded.route?.provider, 'provider-a');
+  assert.equal(loaded.route?.model?.id, 'model-a');
+  assert.equal(loaded.metadata.terminal, false);
+  assert.equal(typeof loaded.streamEvents[0]?.sequence, 'number');
+  assert.equal(typeof loaded.streamEvents[0]?.timestamp, 'string');
+  assert.equal(reader.replayableStreamEvents(loaded).length, 2);
 });

@@ -49,27 +49,34 @@ export class StatusToolService {
 
   async postStatus(input: PostStatusInput): Promise<TaskStatusUpdateEvent> {
     const context = await this.requireContext(input);
-    return this.projector.updateStatus({
+    await this.projector.loadBySessionUri(context.sessionUri);
+    const event = this.projector.updateStatus({
       sessionUri: context.sessionUri,
       turnId: context.turnId,
       state: input.state,
       text: input.message,
       activity: input.activity,
     });
+    await this.saveContextRecord(context.sessionUri);
+    return event;
   }
 
   async requestInput(input: RequestInputInput): Promise<TaskStatusUpdateEvent> {
     const context = await this.requireContext(input);
-    return this.projector.requestInput({
+    await this.projector.loadBySessionUri(context.sessionUri);
+    const event = this.projector.requestInput({
       sessionUri: context.sessionUri,
       turnId: context.turnId,
       prompt: input.prompt,
     });
+    await this.saveContextRecord(context.sessionUri);
+    return event;
   }
 
   async publishArtifact(input: PublishArtifactInput): Promise<TaskArtifactUpdateEvent> {
     const context = await this.requireContext(input);
-    return this.projector.publishArtifact({
+    await this.projector.loadBySessionUri(context.sessionUri);
+    const event = this.projector.publishArtifact({
       sessionUri: context.sessionUri,
       turnId: context.turnId,
       artifactId: input.artifactId,
@@ -78,15 +85,20 @@ export class StatusToolService {
       text: input.text,
       metadata: input.metadata,
     });
+    await this.saveContextRecord(context.sessionUri);
+    return event;
   }
 
   async setActivity(input: SetActivityInput): Promise<TaskStatusUpdateEvent> {
     const context = await this.requireContext(input);
-    return this.projector.updateStatus({
+    await this.projector.loadBySessionUri(context.sessionUri);
+    const event = this.projector.updateStatus({
       sessionUri: context.sessionUri,
       turnId: context.turnId,
       activity: input.activity,
     });
+    await this.saveContextRecord(context.sessionUri);
+    return event;
   }
 
   private async requireContext(input: unknown): Promise<TrustedToolContext> {
@@ -97,6 +109,11 @@ export class StatusToolService {
     if (explicit) return explicit;
 
     throw new Error('Trusted AHP forwarding context is required for status tool calls');
+  }
+
+  private async saveContextRecord(sessionUri: URI): Promise<void> {
+    const record = this.projector.getBySessionUri(sessionUri);
+    if (record) await this.projector.save(record);
   }
 }
 

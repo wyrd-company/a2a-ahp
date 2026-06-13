@@ -27,6 +27,8 @@ export type {
   TurnDispatch,
 } from './ahp/runtime.js';
 
+export { InMemoryA2aTaskStore } from './projection/task-store.js';
+export type { A2aTaskStore } from './projection/task-store.js';
 export { TaskProjector, sessionUriForTask } from './projection/task-projector.js';
 export type {
   ArtifactInput,
@@ -34,7 +36,11 @@ export type {
   InputRequestInput,
   StatusUpdateInput,
   TaskCorrelation,
+  TaskProjectorOptions,
   TaskRecord,
+  TaskRecordMetadata,
+  TaskRoute,
+  StoredProjectionEvent,
 } from './projection/task-projector.js';
 
 export {

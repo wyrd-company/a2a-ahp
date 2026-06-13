@@ -27,6 +27,7 @@ import {
   type RequestInputInput,
   type SetActivityInput,
 } from '../mcp/status-server.js';
+import type { A2aTaskStore } from '../projection/task-store.js';
 import { sessionUriForTask, TaskProjector, type TaskRecord } from '../projection/task-projector.js';
 
 export interface AhpSessionRoute {
@@ -37,6 +38,7 @@ export interface AhpSessionRoute {
 export interface A2aAhpRequestHandlerOptions {
   readonly runtime: AhpRuntime;
   readonly projector?: TaskProjector;
+  readonly taskStore?: A2aTaskStore;
   readonly agentCard?: Partial<AgentCard>;
   readonly route?: AhpSessionRoute;
 }
@@ -50,7 +52,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
 
   constructor(options: A2aAhpRequestHandlerOptions) {
     this.runtime = options.runtime;
-    this.projector = options.projector ?? new TaskProjector();
+    this.projector = options.projector ?? new TaskProjector({ store: options.taskStore });
     this.agentCard = createAgentCard(options.agentCard);
     this.route = options.route;
   }
@@ -98,13 +100,13 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
   }
 
   async getTask(params: TaskQueryParams, _context?: ServerCallContext): Promise<Task> {
-    const record = this.projector.getByTaskId(params.id);
+    const record = await this.projector.loadByTaskId(params.id);
     if (!record) throw A2AError.taskNotFound(params.id);
     return this.projector.taskWithHistoryLimit(record, params.historyLength);
   }
 
   async cancelTask(params: TaskIdParams, _context?: ServerCallContext): Promise<Task> {
-    const record = this.projector.getByTaskId(params.id);
+    const record = await this.projector.loadByTaskId(params.id);
     if (!record) throw A2AError.taskNotFound(params.id);
     const turnId = record.correlation.activeTurnId;
     if (!turnId || isTerminalTaskState(record.task.status.state)) throw A2AError.taskNotCancelable(params.id);
@@ -113,6 +115,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
       type: 'session/turnCancelled',
       turnId,
     } as never);
+    await this.projector.save(record);
     return this.projector.taskWithHistoryLimit(record);
   }
 
@@ -148,9 +151,13 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     params: TaskIdParams,
     _context?: ServerCallContext,
   ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
-    const record = this.projector.getByTaskId(params.id);
+    const record = await this.projector.loadByTaskId(params.id);
     if (!record) throw A2AError.taskNotFound(params.id);
     yield this.projector.taskWithHistoryLimit(record);
+    for (const event of this.projector.replayableStreamEvents(record)) {
+      yield event;
+      if (event.kind === 'status-update' && event.final) return;
+    }
 
     if (isTerminalTaskState(record.task.status.state)) return;
 
@@ -171,7 +178,14 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     const taskId = message.taskId ?? randomUUID();
     const contextId = message.contextId ?? randomUUID();
     const sessionUri = sessionUriForTask(taskId);
-    const record = this.projector.ensureTask({ taskId, contextId, sessionUri, userMessage: message });
+    const stored = await this.projector.loadByTaskId(taskId) ??
+      await this.projector.loadByContextId(contextId) ??
+      await this.projector.loadBySessionUri(sessionUri);
+    const record = stored ?? this.projector.ensureTask({ taskId, contextId, sessionUri, userMessage: message, route: this.route });
+    if (stored) {
+      this.projector.ensureTask({ taskId, contextId, sessionUri: stored.correlation.sessionUri, userMessage: message, route: this.route });
+    }
+    await this.projector.save(record);
 
     await this.runtime.createSession({
       sessionUri: record.correlation.sessionUri,
@@ -182,6 +196,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
 
     const turnId = randomUUID();
     record.correlation.activeTurnId = turnId;
+    await this.projector.save(record);
     this.runtime.dispatchTurn({
       sessionUri: record.correlation.sessionUri,
       turnId,
@@ -193,13 +208,16 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
 
   private async projectRuntimeEvent(event: AhpRuntimeEvent): Promise<Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>> {
     if (event.type !== 'action') return [];
+    const record = await this.projector.loadBySessionUri(event.sessionUri);
     this.rememberStatusToolCall(event.sessionUri, event.action);
     const toolResult = await this.executeStatusToolCall(event.sessionUri, event.action);
     if (toolResult) {
       this.runtime.completeToolCall(event.sessionUri, toolResult.turnId, toolResult.toolCallId, toolResult.result);
       return toolResult.events;
     }
-    return this.projector.projectAction(event.sessionUri, event.action);
+    const events = this.projector.projectAction(event.sessionUri, event.action);
+    if (record) await this.projector.save(record);
+    return events;
   }
 
   private async executeStatusToolCall(

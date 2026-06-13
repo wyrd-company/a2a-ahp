@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  InMemoryA2aTaskStore,
   postStatusSchema,
   publishArtifactSchema,
   requestInputSchema,
@@ -85,6 +86,31 @@ test('status tools reject calls without trusted context unless isolated fallback
   });
   const event = await fallbackService.postStatus({ state: 'working' });
   assert.equal(event.status.state, 'working');
+});
+
+test('status tools hydrate task correlation from the task store by trusted session context', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const writer = new TaskProjector({ store });
+  const written = writer.ensureTask({
+    taskId: 'task-s5',
+    contextId: 'ctx-s5',
+    sessionUri: 'ahp-session:/status-5',
+  });
+  await writer.save(written);
+
+  const reader = new TaskProjector({ store });
+  const service = new StatusToolService({
+    projector: reader,
+    contextResolver: { resolve: () => ({ sessionUri: 'ahp-session:/status-5', turnId: 'turn-5' }) },
+  });
+
+  const event = await service.postStatus({ state: 'working', message: 'Hydrated' });
+  const saved = await store.getByTaskId('task-s5');
+
+  assert.equal(event.taskId, 'task-s5');
+  assert.equal(event.contextId, 'ctx-s5');
+  assert.equal(saved?.correlation.activeTurnId, 'turn-5');
+  assert.equal(saved?.task.status.state, 'working');
 });
 
 function serviceForSession(sessionUri: string): { projector: TaskProjector; service: StatusToolService } {

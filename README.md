@@ -68,6 +68,8 @@ Supported methods:
   - Updates the local A2A projection to `canceled`.
 - `tasks/resubscribe`
   - Yields the current local task projection.
+  - Replays bounded projected stream updates that the adapter can safely
+    represent as A2A task/artifact updates.
   - Reattaches to the AHP session and streams future projected updates.
 
 Push notification methods currently return A2A push-notification-not-supported
@@ -89,6 +91,41 @@ Initial text-first mappings:
 - `session/turnCancelled` -> A2A `canceled`
 
 Artifacts published by status tools are projected as text artifacts.
+
+## Durable Task Store
+
+By default, task projection state is held in memory. Hosts that need A2A task
+resume should provide an `A2aTaskStore` implementation to
+`A2aAhpRequestHandler`.
+
+The store owns durable persistence for:
+
+- task ID and context ID
+- current A2A task status
+- bounded message history and projected stream updates
+- projected artifacts
+- mapped AHP session URI and active turn ID
+- provider/model route metadata
+- timestamps, sequence, and terminal state metadata
+
+`a2a-ahp` exports `A2aTaskStore` as the backend-neutral contract and
+`InMemoryA2aTaskStore` for tests and ephemeral embeddings. Applications should
+provide the concrete local store, database, or filesystem-backed implementation
+that matches their runtime.
+
+```typescript
+import {
+  A2aAhpRequestHandler,
+  type A2aTaskStore,
+} from '@wyrd-company/a2a-ahp';
+
+declare const taskStore: A2aTaskStore;
+
+const requestHandler = new A2aAhpRequestHandler({
+  runtime,
+  taskStore,
+});
+```
 
 ## MCP Status Tools
 

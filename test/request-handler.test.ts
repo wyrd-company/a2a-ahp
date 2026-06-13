@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import type { Message, Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { StateAction } from '@microsoft/agent-host-protocol';
 
-import { A2aAhpRequestHandler, sessionUriForTask } from '../src/index.js';
+import { A2aAhpRequestHandler, InMemoryA2aTaskStore, sessionUriForTask } from '../src/index.js';
 import { FakeAhpRuntime } from './fake-runtime.js';
 
 test('message/send creates an AHP session and dispatches an AHP user turn', async () => {
@@ -108,6 +108,53 @@ test('tasks/resubscribe streams future projected events', async () => {
 
   assert.equal(completed.done, false);
   assert.equal((completed.value as TaskStatusUpdateEvent).status.state, 'completed');
+});
+
+test('tasks/get hydrates task projection from a durable task store', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const runtime = new FakeAhpRuntime();
+  const writer = new A2aAhpRequestHandler({
+    runtime,
+    taskStore: store,
+    route: { provider: 'provider-a', model: { id: 'model-a' } },
+  });
+  await writer.sendMessage({ message: userMessage('task-store-1', 'ctx-store-1', 'Persist') });
+
+  const reader = new A2aAhpRequestHandler({ runtime: new FakeAhpRuntime(), taskStore: store });
+  const task = await reader.getTask({ id: 'task-store-1' });
+  const record = reader.projector.getByTaskId('task-store-1');
+
+  assert.equal(task.id, 'task-store-1');
+  assert.equal(task.contextId, 'ctx-store-1');
+  assert.equal(record?.route?.provider, 'provider-a');
+  assert.equal(record?.route?.model?.id, 'model-a');
+});
+
+test('tasks/resubscribe replays persisted stream updates before future events', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const runtime = new FakeAhpRuntime();
+  const writer = new A2aAhpRequestHandler({ runtime, taskStore: store });
+  const stream = writer.sendMessageStream({ message: userMessage('task-store-2', 'ctx-store-2', 'Stream persist') });
+
+  await stream.next();
+  await waitFor(() => runtime.dispatchedTurns.length === 1);
+  const dispatch = runtime.dispatchedTurns[0]!;
+  runtime.emit(dispatch.sessionUri, responsePart(dispatch.turnId));
+  runtime.emit(dispatch.sessionUri, delta(dispatch.turnId, 'persisted chunk'));
+  const projected = await stream.next();
+  assert.equal(projected.done, false);
+
+  const reader = new A2aAhpRequestHandler({ runtime: new FakeAhpRuntime(), taskStore: store });
+  const resumed = reader.resubscribe({ id: 'task-store-2' });
+
+  const task = await resumed.next();
+  const replay = await resumed.next();
+
+  assert.equal(task.done, false);
+  assert.equal((task.value as Task).id, 'task-store-2');
+  assert.equal(replay.done, false);
+  assert.equal((replay.value as TaskStatusUpdateEvent).kind, 'status-update');
+  assert.equal((replay.value as TaskStatusUpdateEvent).status.state, 'working');
 });
 
 test('active-client status tool calls update projection and complete through AHP', async () => {

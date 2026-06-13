@@ -18,7 +18,6 @@ Implemented in the first slice:
   and cancellation
 - Automatic A2A adapter instance generation from AHP provider/model discovery
 - Allow/deny filtering for exposed AHP provider/model combinations
-- Optional NATS serving composer for `@wyrd-company/a2a-nats`
 - Local correlation between A2A task/context IDs and AHP session/turn IDs
 - Text-first projection from AHP session actions into A2A tasks, messages, and
   stream events
@@ -237,50 +236,20 @@ for (const agent of agents) {
 }
 ```
 
-### NATS Transport
+### Other A2A Transports
 
-Use the optional `./nats` subpath when you want the adapter to derive NATS
-subjects, NATS AgentCard URLs, and optionally publish cards to a registry:
-
-```typescript
-import { JetStreamKvAgentCardRegistry } from '@wyrd-company/a2a-nats';
-import { serveA2aAhpOverNats } from '@wyrd-company/a2a-ahp/nats';
-
-const registry = new JetStreamKvAgentCardRegistry({
-  connection: nc,
-  bucket: 'a2a-agent-cards',
-  namespace: 'a2a',
-});
-
-const serving = await serveA2aAhpOverNats({
-  runtime,
-  connection: nc,
-  namespace: 'a2a',
-  registry,
-});
-
-await serving.ready();
-```
-
-This is a convenience composer. It still returns the generated A2A agents,
-subjects, and underlying `NatsA2AServer` instances so embedding code can inspect
-or close them.
-
-Without the composer, use the transport-neutral agents directly with
-`@wyrd-company/a2a-nats`:
+`a2a-ahp` returns A2A JS request handlers and does not own transport-specific
+serving. Host applications can mount generated agents on any transport that
+accepts the A2A JS server `A2ARequestHandler` abstraction.
 
 ```typescript
-import { NatsA2AServer, a2aNatsAgentSubject } from '@wyrd-company/a2a-nats';
+declare const serveA2A: (agent: {
+  id: string;
+  requestHandler: unknown;
+}) => Promise<void>;
 
 for (const agent of agents) {
-  const subject = a2aNatsAgentSubject({ namespace: 'a2a', agentId: agent.id });
-  const server = new NatsA2AServer({
-    connection: nc,
-    subject,
-    requestHandler: agent.requestHandler,
-  });
-
-  await server.ready();
+  await serveA2A(agent);
 }
 ```
 
@@ -344,7 +313,6 @@ void statusTools;
 - `src/a2a/adapter-factory.ts` - AHP provider/model discovery, filtering, and
   AgentCard derivation
 - `src/ahp/runtime.ts` - AHP client runtime facade
-- `src/nats.ts` - optional NATS serving composer
 - `src/projection/task-projector.ts` - A2A task projection and correlation store
 - `src/mcp/status-server.ts` - MCP status tool service and HTTPS server helper
 - `src/mappers/a2a-to-ahp.ts` - A2A message to AHP message mapping
@@ -362,5 +330,5 @@ npm run verify
 `npm run verify` runs typecheck, tests, and build.
 
 The test suite uses a fake AHP runtime for adapter-level acceptance coverage,
-plus focused integration tests against the local `ahp-server` in-memory
-transport and `a2a-nats` request/reply server.
+plus a focused integration test against the local `ahp-server` in-memory
+transport.

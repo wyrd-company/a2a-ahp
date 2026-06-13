@@ -20,15 +20,15 @@
     ".": {
       "import": "./dist/src/index.js",
       "types": "./dist/src/index.d.ts"
-    },
-    "./nats": {
-      "import": "./dist/src/nats.js",
-      "types": "./dist/src/nats.d.ts"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
     "test": "node --test --import tsx test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "npm run typecheck && npm test && npm run build"
@@ -39,16 +39,7 @@
     "@modelcontextprotocol/sdk": "^1.15.0",
     "zod": "^3.25.0"
   },
-  "peerDependencies": {
-    "@wyrd-company/a2a-nats": "^0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "@wyrd-company/a2a-nats": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@wyrd-company/a2a-nats": "file:../a2a-nats",
     "@wyrd-company/ahp-server": "file:../ahp-server",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",

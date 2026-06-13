@@ -40,7 +40,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@wyrd-company/ahp-server": "file:../ahp-server",
+    "@wyrd-company/ahp-server": "^0.1.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

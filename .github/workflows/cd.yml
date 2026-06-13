@@ -13,73 +13,16 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Check out a2a-ahp
-        uses: actions/checkout@v4
-        with:
-          path: a2a-ahp
-
-      - name: Check out ahp-provider-kit
-        uses: actions/checkout@v4
-        with:
-          repository: wyrd-company/ahp-provider-kit
-          path: ahp-provider-kit
-
-      - name: Check out ahp-nats
-        uses: actions/checkout@v4
-        with:
-          repository: wyrd-company/ahp-nats
-          path: ahp-nats
-
-      - name: Check out ahp-grpc
-        uses: actions/checkout@v4
-        with:
-          repository: wyrd-company/ahp-grpc
-          path: ahp-grpc
-
-      - name: Check out ahp-codex-app-server
-        uses: actions/checkout@v4
-        with:
-          repository: wyrd-company/ahp-codex-app-server
-          path: ahp-codex-app-server
-
-      - name: Check out ahp-server
-        uses: actions/checkout@v4
-        with:
-          repository: wyrd-company/ahp-server
-          path: ahp-server
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
-          cache-dependency-path: |
-            a2a-ahp/package-lock.json
-            ahp-provider-kit/package-lock.json
-            ahp-nats/package-lock.json
-            ahp-grpc/package-lock.json
-            ahp-codex-app-server/package-lock.json
-            ahp-server/package-lock.json
-
-      - name: Build local workspace dependencies
-        run: |
-          set -euo pipefail
-          for package in \
-            ahp-provider-kit \
-            ahp-nats \
-            ahp-grpc \
-            ahp-codex-app-server \
-            ahp-server
-          do
-            npm --prefix "$package" ci
-            npm --prefix "$package" run build
-          done
-
-      - name: Install a2a-ahp
-        run: npm ci
-        working-directory: a2a-ahp
+      - run: npm ci
 
       - name: Set package version from SemVer tag
         run: |
@@ -89,14 +32,11 @@ jobs:
             exit 1
           fi
           npm version --no-git-tag-version "$TAG"
-        working-directory: a2a-ahp
 
       - run: npm run verify
-        working-directory: a2a-ahp
 
       - name: Publish to npmjs.org
         run: npm publish --provenance --access public
-        working-directory: a2a-ahp
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -108,7 +48,6 @@ jobs:
 
       - name: Publish to GitHub Packages
         run: npm publish --registry https://npm.pkg.github.com
-        working-directory: a2a-ahp
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -116,6 +55,5 @@ jobs:
         run: |
           title="$(node -p "require('./package.json').name + '@' + require('./package.json').version")"
           gh release create "${GITHUB_REF_NAME}" --title "$title" --generate-notes
-        working-directory: a2a-ahp
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

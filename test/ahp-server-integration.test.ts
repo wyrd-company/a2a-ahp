@@ -3,22 +3,27 @@ import { test } from 'node:test';
 
 import type { Message as A2aMessage } from '@a2a-js/sdk';
 import type { AgentInfo, Message, StateAction } from '@microsoft/agent-host-protocol';
-import { AhpServer, type AgentProvider, type AgentSession, type AgentTurnSink } from '@wyrd-company/ahp-server';
+import {
+  AhpServer,
+  createInProcessAhpClientTransport,
+  type AgentProvider,
+  type AgentSession,
+  type AgentTurnSink,
+} from '@wyrd-company/ahp-server';
 
-import { createA2aAhpAgents } from '../src/index.js';
-import { createInProcessAhpRuntime } from '../src/ahp-server.js';
+import { AhpClientRuntime, createA2aAhpAgents } from '../src/index.js';
 
 test('uses an existing in-process AHP server instance as the adapter runtime', async () => {
   const server = new AhpServer({ providers: [createEchoProvider()] });
-  const inProcess = createInProcessAhpRuntime({
-    server,
+  const inProcess = createInProcessAhpClientTransport(server);
+  const runtime = new AhpClientRuntime(inProcess.transport, {
     clientId: 'a2a-ahp-test',
     requestTimeoutMs: 1_000,
   });
 
   try {
     const agents = await createA2aAhpAgents({
-      runtime: inProcess.runtime,
+      runtime,
       baseUrl: 'https://agents.example',
     });
 
@@ -36,6 +41,7 @@ test('uses an existing in-process AHP server instance as the adapter runtime', a
     assert.equal(part?.kind, 'text');
     assert.equal(part?.kind === 'text' ? part.text : '', 'Echo: Hello AHP');
   } finally {
+    await runtime.shutdown();
     await inProcess.close();
   }
 });

@@ -18,8 +18,6 @@ Implemented in the first slice:
   and cancellation
 - Automatic A2A adapter instance generation from AHP provider/model discovery
 - Allow/deny filtering for exposed AHP provider/model combinations
-- Optional in-process bridge for reusing an existing `@wyrd-company/ahp-server`
-  instance
 - Optional NATS serving composer for `@wyrd-company/a2a-nats`
 - Local correlation between A2A task/context IDs and AHP session/turn IDs
 - Text-first projection from AHP session actions into A2A tasks, messages, and
@@ -174,29 +172,35 @@ Each generated agent contains:
 - `agentCard` - derived A2A AgentCard
 - `requestHandler` - A2A server request handler
 
-### Reusing An In-Process AHP Server
+### Same-Process AHP Server Composition
 
-When the A2A adapter and AHP server run in the same process, reuse the existing
-server instance and connect the adapter with the optional `./ahp-server`
-subpath:
+When an application runs the A2A adapter and AHP server in the same process,
+the host application should own the composition. `a2a-ahp` consumes an
+`AhpTransport` or `AhpRuntime`; it does not create or configure the AHP server.
 
 ```typescript
-import { AhpServer } from '@wyrd-company/ahp-server';
-import { createInProcessAhpRuntime } from '@wyrd-company/a2a-ahp/ahp-server';
-import { createA2aAhpAgents } from '@wyrd-company/a2a-ahp';
+import {
+  AhpServer,
+  createInProcessAhpClientTransport,
+} from '@wyrd-company/ahp-server';
+import {
+  AhpClientRuntime,
+  createA2aAhpAgents,
+} from '@wyrd-company/a2a-ahp';
 
 const ahpServer = new AhpServer({
   providers,
 });
 
-const inProcess = createInProcessAhpRuntime({
-  server: ahpServer,
+const inProcess = createInProcessAhpClientTransport(ahpServer);
+
+const runtime = new AhpClientRuntime(inProcess.transport, {
   clientId: 'a2a-ahp-adapter',
   workingDirectory: 'file:///workspaces/example',
 });
 
 const agents = await createA2aAhpAgents({
-  runtime: inProcess.runtime,
+  runtime,
   baseUrl: 'https://agents.example',
 });
 
@@ -204,8 +208,9 @@ const agents = await createA2aAhpAgents({
 // Mount `agents` on whichever A2A transport you need.
 ```
 
-`createInProcessAhpRuntime` does not create or configure providers. It only
-creates an in-memory AHP client connection to the server instance you pass in.
+In this shape, the host configures AHP, exposes AHP over its transports,
+creates an in-process AHP client transport for this adapter, then exposes A2A
+over its transports.
 
 ### Express Transport
 
@@ -339,7 +344,6 @@ void statusTools;
 - `src/a2a/adapter-factory.ts` - AHP provider/model discovery, filtering, and
   AgentCard derivation
 - `src/ahp/runtime.ts` - AHP client runtime facade
-- `src/ahp-server.ts` - optional in-process AHP server runtime bridge
 - `src/nats.ts` - optional NATS serving composer
 - `src/projection/task-projector.ts` - A2A task projection and correlation store
 - `src/mcp/status-server.ts` - MCP status tool service and HTTPS server helper

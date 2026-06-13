@@ -5,10 +5,12 @@ import type {
   RootState,
   SessionModelInfo,
   StateAction,
+  ToolCallResult,
   ToolDefinition,
   URI,
 } from '@microsoft/agent-host-protocol';
 import { AhpClient, type AhpTransport, type SubscriptionEvent } from '@microsoft/agent-host-protocol/client';
+import { statusToolDefinitions } from '../mcp/status-server.js';
 
 export type AhpAgentInfo = AgentInfo;
 export type AhpModelInfo = SessionModelInfo;
@@ -36,6 +38,13 @@ export interface TurnDispatch {
   readonly message: AhpMessage;
 }
 
+export interface ToolCallCompletion {
+  readonly sessionUri: URI;
+  readonly turnId: string;
+  readonly toolCallId: string;
+  readonly result: ToolCallResult;
+}
+
 export interface AhpSessionSubscription {
   readonly sessionUri: URI;
   readonly events: AsyncIterableIterator<AhpRuntimeEvent>;
@@ -53,6 +62,7 @@ export interface AhpRuntime {
   subscribe(sessionUri: URI): Promise<AhpSessionSubscription>;
   dispatchTurn(dispatch: TurnDispatch): void;
   cancelTurn(sessionUri: URI, turnId: string): void;
+  completeToolCall(sessionUri: URI, turnId: string, toolCallId: string, result: ToolCallResult): void;
 }
 
 export class AhpClientRuntime implements AhpRuntime {
@@ -68,6 +78,7 @@ export class AhpClientRuntime implements AhpRuntime {
     this.options = {
       ...options,
       protocolVersions: options.protocolVersions ?? ['0.3.0'],
+      statusTools: defaultStatusTools(options.statusTools),
     };
   }
 
@@ -141,6 +152,15 @@ export class AhpClientRuntime implements AhpRuntime {
       turnId,
     } as StateAction);
   }
+
+  completeToolCall(sessionUri: URI, turnId: string, toolCallId: string, result: ToolCallResult): void {
+    this.client.dispatch(sessionUri, {
+      type: 'session/toolCallComplete',
+      turnId,
+      toolCallId,
+      result,
+    } as StateAction);
+  }
 }
 
 function agentsFromInitializeSnapshots(snapshots: readonly { state?: unknown }[]): readonly AhpAgentInfo[] {
@@ -150,6 +170,10 @@ function agentsFromInitializeSnapshots(snapshots: readonly { state?: unknown }[]
   });
   const state = rootSnapshot?.state as Partial<RootState> | undefined;
   return state?.agents ?? [];
+}
+
+function defaultStatusTools(tools: readonly ToolDefinition[] | undefined): readonly ToolDefinition[] {
+  return tools ?? statusToolDefinitions();
 }
 
 async function* mapSubscriptionEvents(

@@ -21,6 +21,7 @@ Implemented in the first slice:
 - Local correlation between A2A task/context IDs and AHP session/turn IDs
 - Text-first projection from AHP session actions into A2A tasks, messages, and
   stream events
+- AHP active-client status tool forwarding into the local A2A task projection
 - HTTPS Streamable HTTP MCP status tool server support
 - Status tool core that can be used independently of the HTTP transport in
   tests or embedding code
@@ -104,6 +105,12 @@ Tool inputs describe intent. They do not require caller-supplied `taskId`,
 `sessionId`, `sessionUri`, or `contextId` when trusted AHP forwarding context is
 available.
 
+`AhpClientRuntime` registers these tools as AHP active-client tools by default.
+When `ahp-server` forwards a client tool call through `session/toolCallStart`
+and `session/toolCallReady`, `A2aAhpRequestHandler` resolves the trusted session
+and turn context, updates the local A2A task projection, and completes the AHP
+tool call with `session/toolCallComplete`.
+
 Correlation is resolved through `ToolContextResolver`, which is expected to
 provide trusted AHP context:
 
@@ -114,7 +121,7 @@ provide trusted AHP context:
 
 For temporary integration paths, `StatusToolService` accepts an isolated
 `fallbackCorrelationResolver`. Keep explicit correlation there so it can be
-removed when active-client tool forwarding is available end to end.
+kept out of normal active-client tool forwarding.
 
 ## Usage
 

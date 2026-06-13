@@ -17,9 +17,16 @@ import { A2AError } from '@a2a-js/sdk/server';
 import { randomUUID } from 'node:crypto';
 
 import type { AhpRuntime, AhpRuntimeEvent } from '../ahp/runtime.js';
-import type { ModelSelection } from '@microsoft/agent-host-protocol';
+import { ToolResultContentType, type ModelSelection, type StateAction, type ToolCallResult } from '@microsoft/agent-host-protocol';
 import { a2aMessageToAhpMessage } from '../mappers/a2a-to-ahp.js';
 import { isTerminalTaskState } from '../mappers/ahp-to-a2a.js';
+import {
+  StatusToolService,
+  type PostStatusInput,
+  type PublishArtifactInput,
+  type RequestInputInput,
+  type SetActivityInput,
+} from '../mcp/status-server.js';
 import { sessionUriForTask, TaskProjector, type TaskRecord } from '../projection/task-projector.js';
 
 export interface AhpSessionRoute {
@@ -39,6 +46,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
   private readonly runtime: AhpRuntime;
   private readonly agentCard: AgentCard;
   private readonly route?: AhpSessionRoute;
+  private readonly activeToolCalls = new Map<string, StatusToolName>();
 
   constructor(options: A2aAhpRequestHandlerOptions) {
     this.runtime = options.runtime;
@@ -62,7 +70,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     }
 
     for await (const event of subscription.events) {
-      this.projectRuntimeEvent(event);
+      await this.projectRuntimeEvent(event);
       if (record.task.status.state === 'completed') {
         return record.task.status.message ?? this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
       }
@@ -82,7 +90,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     yield this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
 
     for await (const event of subscription.events) {
-      for (const projected of this.projectRuntimeEvent(event)) {
+      for (const projected of await this.projectRuntimeEvent(event)) {
         yield projected;
         if (projected.kind === 'status-update' && projected.final) return;
       }
@@ -148,7 +156,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
 
     const subscription = await this.runtime.subscribe(record.correlation.sessionUri);
     for await (const event of subscription.events) {
-      for (const projected of this.projectRuntimeEvent(event)) {
+      for (const projected of await this.projectRuntimeEvent(event)) {
         yield projected;
         if (projected.kind === 'status-update' && projected.final) return;
       }
@@ -183,10 +191,139 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     return { record, subscription };
   }
 
-  private projectRuntimeEvent(event: AhpRuntimeEvent): Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent> {
+  private async projectRuntimeEvent(event: AhpRuntimeEvent): Promise<Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>> {
     if (event.type !== 'action') return [];
+    this.rememberStatusToolCall(event.sessionUri, event.action);
+    const toolResult = await this.executeStatusToolCall(event.sessionUri, event.action);
+    if (toolResult) {
+      this.runtime.completeToolCall(event.sessionUri, toolResult.turnId, toolResult.toolCallId, toolResult.result);
+      return toolResult.events;
+    }
     return this.projector.projectAction(event.sessionUri, event.action);
   }
+
+  private async executeStatusToolCall(
+    sessionUri: string,
+    action: StateAction,
+  ): Promise<{
+    readonly turnId: string;
+    readonly toolCallId: string;
+    readonly result: ToolCallResult;
+    readonly events: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>;
+  } | undefined> {
+    const readyAction = action as unknown;
+    if (!isToolCallReadyAction(readyAction)) return undefined;
+    const toolName = this.activeToolCalls.get(toolCallKey(sessionUri, readyAction.toolCallId));
+    if (!toolName) return undefined;
+
+    const input = parseToolInput(readyAction.toolInput);
+    const events: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+    const service = new StatusToolService({
+      projector: this.projector,
+      contextResolver: {
+        resolve: () => ({
+          sessionUri,
+          turnId: readyAction.turnId,
+          toolCallId: readyAction.toolCallId,
+        }),
+      },
+    });
+
+    try {
+      switch (toolName) {
+        case 'post_status':
+          events.push(await service.postStatus(input as PostStatusInput));
+          break;
+        case 'request_input':
+          events.push(await service.requestInput(input as RequestInputInput));
+          break;
+        case 'publish_artifact':
+          events.push(await service.publishArtifact(input as PublishArtifactInput));
+          break;
+        case 'set_activity':
+          events.push(await service.setActivity(input as SetActivityInput));
+          break;
+      }
+      this.activeToolCalls.delete(toolCallKey(sessionUri, readyAction.toolCallId));
+      return {
+        turnId: readyAction.turnId,
+        toolCallId: readyAction.toolCallId,
+        events,
+        result: {
+          success: true,
+          pastTenseMessage: `Handled ${toolName}`,
+          content: [{ type: ToolResultContentType.Text, text: JSON.stringify(events[0] ?? { ok: true }) }],
+        },
+      };
+    } catch (error) {
+      this.activeToolCalls.delete(toolCallKey(sessionUri, readyAction.toolCallId));
+      return {
+        turnId: readyAction.turnId,
+        toolCallId: readyAction.toolCallId,
+        events,
+        result: {
+          success: false,
+          pastTenseMessage: `Failed to handle ${toolName}`,
+          error: { message: error instanceof Error ? error.message : 'Status tool failed' },
+        },
+      };
+    }
+  }
+
+  private rememberStatusToolCall(sessionUri: string, action: StateAction): void {
+    const startAction = action as unknown;
+    if (!isToolCallStartAction(startAction) || !isStatusToolName(startAction.toolName)) return;
+    this.activeToolCalls.set(toolCallKey(sessionUri, startAction.toolCallId), startAction.toolName);
+  }
+}
+
+type StatusToolName = 'post_status' | 'request_input' | 'publish_artifact' | 'set_activity';
+
+interface ToolCallReadyActionLike {
+  readonly type: 'session/toolCallReady';
+  readonly turnId: string;
+  readonly toolCallId: string;
+  readonly toolInput?: string;
+}
+
+interface ToolCallStartActionLike {
+  readonly type: 'session/toolCallStart';
+  readonly toolCallId: string;
+  readonly toolName: string;
+}
+
+function isToolCallReadyAction(action: unknown): action is ToolCallReadyActionLike {
+  return isRecord(action) &&
+    action.type === 'session/toolCallReady' &&
+    typeof action.turnId === 'string' &&
+    typeof action.toolCallId === 'string';
+}
+
+function isToolCallStartAction(action: unknown): action is ToolCallStartActionLike {
+  return isRecord(action) &&
+    action.type === 'session/toolCallStart' &&
+    typeof action.toolName === 'string' &&
+    typeof action.toolCallId === 'string';
+}
+
+function isStatusToolName(value: string): value is StatusToolName {
+  return value === 'post_status' ||
+    value === 'request_input' ||
+    value === 'publish_artifact' ||
+    value === 'set_activity';
+}
+
+function parseToolInput(input: string | undefined): unknown {
+  if (!input) return {};
+  return JSON.parse(input);
+}
+
+function toolCallKey(sessionUri: string, toolCallId: string): string {
+  return `${sessionUri}\u0000${toolCallId}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function createAgentCard(overrides: Partial<AgentCard> | undefined): AgentCard {

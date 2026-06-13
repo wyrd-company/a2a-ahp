@@ -23,6 +23,7 @@ export type {
   AhpRuntimeOptions,
   AhpSessionSubscription,
   CreateSessionOptions,
+  ToolCallCompletion,
   TurnDispatch,
 } from './ahp/runtime.js';
 

@@ -110,6 +110,54 @@ test('tasks/resubscribe streams future projected events', async () => {
   assert.equal((completed.value as TaskStatusUpdateEvent).status.state, 'completed');
 });
 
+test('active-client status tool calls update projection and complete through AHP', async () => {
+  const runtime = new FakeAhpRuntime();
+  const handler = new A2aAhpRequestHandler({ runtime });
+  const stream = handler.sendMessageStream({ message: userMessage('task-7', 'ctx-7', 'Tool status') });
+
+  const initial = await stream.next();
+  assert.equal(initial.done, false);
+  await waitFor(() => runtime.dispatchedTurns.length === 1);
+  const dispatch = runtime.dispatchedTurns[0]!;
+
+  runtime.emit(dispatch.sessionUri, {
+    type: 'session/toolCallStart',
+    turnId: dispatch.turnId,
+    toolCallId: 'tool-call-1',
+    toolName: 'post_status',
+    displayName: 'Post Status',
+    contributor: { kind: 'client', clientId: 'a2a-ahp-test' },
+  } as StateAction);
+  runtime.emit(dispatch.sessionUri, {
+    type: 'session/toolCallReady',
+    turnId: dispatch.turnId,
+    toolCallId: 'tool-call-1',
+    invocationMessage: 'Post Status',
+    toolInput: JSON.stringify({ state: 'working', message: 'Installing dependencies' }),
+    confirmed: 'not-needed',
+  } as StateAction);
+
+  let update = await stream.next();
+  while (
+    !update.done &&
+    !(
+      (update.value as TaskStatusUpdateEvent).kind === 'status-update' &&
+      (update.value as TaskStatusUpdateEvent).status.message?.parts[0]?.kind === 'text'
+    )
+  ) {
+    update = await stream.next();
+  }
+
+  assert.equal(update.done, false);
+  assert.equal((update.value as TaskStatusUpdateEvent).status.state, 'working');
+  const message = (update.value as TaskStatusUpdateEvent).status.message;
+  assert.equal(message?.parts[0]?.kind, 'text');
+  assert.equal(message?.parts[0]?.kind === 'text' ? message.parts[0].text : '', 'Installing dependencies');
+  assert.equal(runtime.completedToolCalls.length, 1);
+  assert.equal(runtime.completedToolCalls[0]?.toolCallId, 'tool-call-1');
+  assert.equal(runtime.completedToolCalls[0]?.result.success, true);
+});
+
 function userMessage(taskId: string, contextId: string, text: string): Message {
   return {
     kind: 'message',

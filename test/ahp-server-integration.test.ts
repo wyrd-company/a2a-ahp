@@ -1,18 +1,25 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 
 import type { Message as A2aMessage } from '@a2a-js/sdk';
 import type { AgentInfo, Message, StateAction } from '@microsoft/agent-host-protocol';
 import {
   AhpServer,
+  FileSystemSessionStore,
   createInProcessAhpClientTransport,
   type AgentProvider,
   type AgentSession,
   type AgentSessionContext,
   type AgentTurnSink,
+  type ProviderResumeState,
+  type ResumableAgentProvider,
+  type ResumableAgentSessionContext,
 } from '@wyrd-company/ahp-server';
 
-import { AhpClientRuntime, createA2aAhpAgents } from '../src/index.js';
+import { AhpClientRuntime, A2aAhpRequestHandler, InMemoryA2aTaskStore, createA2aAhpAgents } from '../src/index.js';
 
 test('uses an existing in-process AHP server instance as the adapter runtime', async () => {
   const server = new AhpServer({ providers: [createEchoProvider()] });
@@ -86,7 +93,70 @@ test('handles forwarded AHP active-client status tools end to end', async () => 
   }
 });
 
-function createEchoProvider(): AgentProvider {
+test('continues an existing A2A task through ahp-server persisted session resume', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'a2a-ahp-resume-'));
+  const taskStore = new InMemoryA2aTaskStore();
+
+  try {
+    const firstServer = new AhpServer({
+      providers: [createEchoProvider({ nativeSessionId: 'a2a-native-session-1' })],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const firstTransport = createInProcessAhpClientTransport(firstServer);
+    const firstRuntime = new AhpClientRuntime(firstTransport.transport, {
+      clientId: 'a2a-ahp-test',
+      requestTimeoutMs: 1_000,
+    });
+    const firstHandler = new A2aAhpRequestHandler({
+      runtime: firstRuntime,
+      taskStore,
+      route: { provider: 'echo', model: { id: 'echo' } },
+    });
+
+    await firstHandler.sendMessage({
+      message: userMessage('task-resume-server', 'ctx-resume-server', 'First'),
+      configuration: { blocking: true },
+    });
+    await firstRuntime.shutdown();
+    await firstTransport.close();
+
+    const provider = createResumableEchoProvider({ nativeSessionId: 'a2a-native-session-2' });
+    const secondServer = new AhpServer({
+      providers: [provider],
+      store: new FileSystemSessionStore({ directory }),
+    });
+    const secondTransport = createInProcessAhpClientTransport(secondServer);
+    const secondRuntime = new AhpClientRuntime(secondTransport.transport, {
+      clientId: 'a2a-ahp-test',
+      requestTimeoutMs: 1_000,
+    });
+    const secondHandler = new A2aAhpRequestHandler({
+      runtime: secondRuntime,
+      taskStore,
+    });
+
+    const result = await secondHandler.sendMessage({
+      message: userMessage('task-resume-server', 'ctx-resume-server', 'Second'),
+      configuration: { blocking: true },
+    });
+
+    assert.equal(provider.resumedSessionUri, 'ahp-session:/a2a/task-resume-server');
+    assert.deepEqual(provider.resumedResumeState, { nativeSessionId: 'a2a-native-session-1' });
+    const part = (result as A2aMessage).parts[0];
+    assert.equal(part?.kind, 'text');
+    assert.equal(part?.kind === 'text' ? part.text : '', 'Resumed Echo: Second');
+
+    const persisted = new FileSystemSessionStore({ directory }).getSession('ahp-session:/a2a/task-resume-server');
+    assert.deepEqual(persisted?.providerResumeState, { nativeSessionId: 'a2a-native-session-2' });
+
+    await secondRuntime.shutdown();
+    await secondTransport.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function createEchoProvider(resumeState?: ProviderResumeState): AgentProvider {
   const agent: AgentInfo = {
     provider: 'echo',
     displayName: 'Echo Agent',
@@ -125,7 +195,73 @@ function createEchoProvider(): AgentProvider {
             turnId,
           } as StateAction);
         },
+        getResumeState() {
+          return resumeState;
+        },
       };
+    },
+  };
+}
+
+function createResumableEchoProvider(resumeState?: ProviderResumeState): ResumableEchoProvider {
+  return new ResumableEchoProvider(resumeState);
+}
+
+class ResumableEchoProvider implements ResumableAgentProvider {
+  readonly agent: AgentInfo = {
+    provider: 'echo',
+    displayName: 'Echo Agent',
+    description: 'Test resumable echo provider.',
+    models: [
+      {
+        id: 'echo',
+        provider: 'echo',
+        name: 'Echo',
+      },
+    ],
+  };
+
+  resumedSessionUri: string | undefined;
+  resumedResumeState: ProviderResumeState | undefined;
+
+  constructor(private readonly resumeState?: ProviderResumeState) {}
+
+  createSession(): AgentSession {
+    return createEchoSession('Echo', this.resumeState);
+  }
+
+  resumeSession(context: ResumableAgentSessionContext): AgentSession {
+    this.resumedSessionUri = context.sessionUri;
+    this.resumedResumeState = context.resumeState;
+    return createEchoSession('Resumed Echo', this.resumeState);
+  }
+}
+
+function createEchoSession(prefix: string, resumeState?: ProviderResumeState): AgentSession {
+  return {
+    async sendUserMessage(message: Message, sink: AgentTurnSink, _signal: AbortSignal, turnId = 'turn-1'): Promise<void> {
+      sink.emit({
+        type: 'session/responsePart',
+        turnId,
+        part: {
+          kind: 'markdown',
+          id: 'part-1',
+          content: '',
+        },
+      } as StateAction);
+      sink.emit({
+        type: 'session/delta',
+        turnId,
+        partId: 'part-1',
+        content: `${prefix}: ${message.text}`,
+      } as StateAction);
+      sink.emit({
+        type: 'session/turnComplete',
+        turnId,
+      } as StateAction);
+    },
+    getResumeState() {
+      return resumeState;
     },
   };
 }

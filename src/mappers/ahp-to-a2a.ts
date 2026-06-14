@@ -59,3 +59,7 @@ export function errorMessageFromAction(action: StateAction): string {
   const error = (action as { error?: { message?: string } }).error;
   return error?.message ?? 'AHP turn failed';
 }
+
+export function errorMessageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error';
+}

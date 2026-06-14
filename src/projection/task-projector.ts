@@ -194,6 +194,7 @@ export class TaskProjector {
     switch (action.type) {
       case 'session/turnStarted':
         record.correlation.activeTurnId = (action as { turnId: string }).turnId;
+        record.currentAssistantMessageId = randomUUID();
         this.setStatus(record, 'working');
         events = [toStatusEvent(record)];
         break;

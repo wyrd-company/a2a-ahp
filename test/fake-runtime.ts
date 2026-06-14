@@ -1,10 +1,11 @@
-import type { AgentInfo, StateAction, URI } from '@microsoft/agent-host-protocol';
+import type { AgentInfo, StateAction, SubscribeResult, URI } from '@microsoft/agent-host-protocol';
 
 import type {
   AhpRuntime,
   AhpRuntimeEvent,
   AhpSessionSubscription,
   CreateSessionOptions,
+  ResumeSessionOptions,
   ToolCallCompletion,
   TurnDispatch,
 } from '../src/ahp/runtime.js';
@@ -12,6 +13,7 @@ import { AsyncTopic } from '../src/util/async-queue.js';
 
 export class FakeAhpRuntime implements AhpRuntime {
   readonly createdSessions: CreateSessionOptions[] = [];
+  readonly resumedSessions: ResumeSessionOptions[] = [];
   readonly dispatchedTurns: TurnDispatch[] = [];
   readonly canceledTurns: Array<{ sessionUri: URI; turnId: string }> = [];
   readonly completedToolCalls: ToolCallCompletion[] = [];
@@ -38,9 +40,16 @@ export class FakeAhpRuntime implements AhpRuntime {
     this.topic(options.sessionUri);
   }
 
+  async resumeSession(options: ResumeSessionOptions): Promise<AhpSessionSubscription> {
+    this.resumedSessions.push(options);
+    this.topic(options.sessionUri);
+    return this.subscribe(options.sessionUri);
+  }
+
   async subscribe(sessionUri: URI): Promise<AhpSessionSubscription> {
     return {
       sessionUri,
+      result: snapshotResult(sessionUri),
       events: this.topic(sessionUri).subscribe(),
     };
   }
@@ -84,4 +93,14 @@ export class FakeAhpRuntime implements AhpRuntime {
     }
     return topic;
   }
+}
+
+function snapshotResult(sessionUri: URI): SubscribeResult {
+  return {
+    snapshot: {
+      resource: sessionUri,
+      state: {} as never,
+      fromSeq: 0,
+    },
+  };
 }

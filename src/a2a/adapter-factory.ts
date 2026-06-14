@@ -1,7 +1,9 @@
 import type { AgentCard, AgentSkill } from '@a2a-js/sdk';
 
 import { A2aAhpRequestHandler, type AhpSessionRoute } from './request-handler.js';
+import { resumeA2aAhpTasks, type A2aResumePolicy, type A2aTaskResumeFailure, type A2aTaskResumeResult } from './resume.js';
 import type { AhpAgentInfo, AhpModelInfo, AhpRuntime } from '../ahp/runtime.js';
+import type { A2aTaskStore } from '../projection/task-store.js';
 import { TaskProjector } from '../projection/task-projector.js';
 
 export interface ProviderModelFilter {
@@ -16,11 +18,20 @@ export interface ProviderModelPolicy {
 
 export interface A2aAhpAdapterFactoryOptions {
   readonly runtime: AhpRuntime;
+  readonly taskStore?: A2aTaskStore;
   readonly baseUrl?: string;
   readonly agentCardUrl?: (route: AhpSessionRoute, agent: AhpAgentInfo, model: AhpModelInfo, path: string) => string;
   readonly policy?: ProviderModelPolicy;
+  readonly resume?: A2aAhpFactoryResumeOptions;
   readonly projectorFactory?: (route: AhpSessionRoute) => TaskProjector;
   readonly agentCardOverrides?: Partial<AgentCard> | ((route: AhpSessionRoute, agent: AhpAgentInfo, model: AhpModelInfo) => Partial<AgentCard>);
+}
+
+export interface A2aAhpFactoryResumeOptions {
+  readonly enabled: boolean;
+  readonly policy?: A2aResumePolicy;
+  readonly onTaskResumed?: (result: A2aTaskResumeResult) => void | Promise<void>;
+  readonly onTaskResumeFailed?: (result: A2aTaskResumeFailure) => void | Promise<void>;
 }
 
 export interface A2aAhpAgent {
@@ -63,7 +74,8 @@ export async function createA2aAhpAgents(
       });
       const handler = new A2aAhpRequestHandler({
         runtime: options.runtime,
-        projector: options.projectorFactory?.(route) ?? new TaskProjector(),
+        projector: options.projectorFactory?.(route) ?? new TaskProjector({ store: options.taskStore }),
+        taskStore: options.taskStore,
         route,
         agentCard,
       });
@@ -78,6 +90,17 @@ export async function createA2aAhpAgents(
         requestHandler: handler,
       });
     }
+  }
+
+  if (options.resume?.enabled) {
+    if (!options.taskStore) throw new Error('taskStore is required when A2A task resume is enabled');
+    await resumeA2aAhpTasks({
+      runtime: options.runtime,
+      taskStore: options.taskStore,
+      policy: options.resume.policy,
+      onTaskResumed: options.resume.onTaskResumed,
+      onTaskResumeFailed: options.resume.onTaskResumeFailed,
+    });
   }
 
   return instances;

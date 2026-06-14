@@ -187,12 +187,15 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     }
     await this.projector.save(record);
 
-    await this.runtime.createSession({
+    const sessionOptions = {
       sessionUri: record.correlation.sessionUri,
       contextId: record.correlation.contextId,
-      ...this.route,
-    });
-    const subscription = await this.runtime.subscribe(record.correlation.sessionUri);
+      provider: record.route?.provider ?? this.route?.provider,
+      model: record.route?.model ?? this.route?.model,
+    };
+    const subscription = stored
+      ? await this.runtime.resumeSession(sessionOptions)
+      : await this.createAndSubscribe(sessionOptions);
 
     const turnId = randomUUID();
     record.correlation.activeTurnId = turnId;
@@ -206,7 +209,21 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     return { record, subscription };
   }
 
+  private async createAndSubscribe(options: {
+    readonly sessionUri: string;
+    readonly contextId: string;
+    readonly provider?: string;
+    readonly model?: ModelSelection;
+  }): Promise<Awaited<ReturnType<AhpRuntime['subscribe']>>> {
+    await this.runtime.createSession(options);
+    return this.runtime.subscribe(options.sessionUri);
+  }
+
   private async projectRuntimeEvent(event: AhpRuntimeEvent): Promise<Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>> {
+    return this.handleRuntimeEvent(event);
+  }
+
+  async handleRuntimeEvent(event: AhpRuntimeEvent): Promise<Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>> {
     if (event.type !== 'action') return [];
     const record = await this.projector.loadBySessionUri(event.sessionUri);
     this.rememberStatusToolCall(event.sessionUri, event.action);

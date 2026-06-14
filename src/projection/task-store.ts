@@ -6,7 +6,15 @@ export interface A2aTaskStore {
   getByTaskId(taskId: string): Promise<TaskRecord | undefined>;
   getByContextId(contextId: string): Promise<TaskRecord | undefined>;
   getBySessionUri(sessionUri: URI): Promise<TaskRecord | undefined>;
+  list(options?: A2aTaskStoreListOptions): Promise<TaskRecord[]>;
   save(record: TaskRecord): Promise<void>;
+}
+
+export interface A2aTaskStoreListOptions {
+  readonly terminal?: boolean;
+  readonly provider?: string;
+  readonly updatedBefore?: string;
+  readonly updatedAfter?: string;
 }
 
 export class InMemoryA2aTaskStore implements A2aTaskStore {
@@ -32,6 +40,15 @@ export class InMemoryA2aTaskStore implements A2aTaskStore {
   async getBySessionUri(sessionUri: URI): Promise<TaskRecord | undefined> {
     const taskId = this.bySessionUri.get(sessionUri);
     return taskId ? cloneRecord(this.byTaskId.get(taskId)) : undefined;
+  }
+
+  async list(options: A2aTaskStoreListOptions = {}): Promise<TaskRecord[]> {
+    return [...this.byTaskId.values()]
+      .filter(record => options.terminal === undefined || record.metadata.terminal === options.terminal)
+      .filter(record => options.provider === undefined || record.route?.provider === options.provider)
+      .filter(record => options.updatedBefore === undefined || record.metadata.updatedAt < options.updatedBefore)
+      .filter(record => options.updatedAfter === undefined || record.metadata.updatedAt > options.updatedAfter)
+      .map(record => cloneRecord(record));
   }
 
   async save(record: TaskRecord): Promise<void> {

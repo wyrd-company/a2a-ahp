@@ -95,8 +95,8 @@ Artifacts published by status tools are projected as text artifacts.
 ## Durable Task Store
 
 By default, task projection state is held in memory. Hosts that need A2A task
-resume should provide an `A2aTaskStore` implementation to
-`A2aAhpRequestHandler`.
+resume should provide an `A2aTaskStore` implementation and call the adapter's
+resume orchestration API during startup.
 
 The store owns durable persistence for:
 
@@ -126,6 +126,58 @@ const requestHandler = new A2aAhpRequestHandler({
   taskStore,
 });
 ```
+
+## Startup Resume
+
+Task resume is an A2A adapter responsibility. Host applications provide the
+AHP runtime and task store; the adapter owns the task/session rebinding rules.
+
+```typescript
+import {
+  resumeA2aAhpTasks,
+  type A2aTaskStore,
+} from '@wyrd-company/a2a-ahp';
+
+declare const taskStore: A2aTaskStore;
+
+await resumeA2aAhpTasks({
+  runtime,
+  taskStore,
+  policy: 'non-terminal',
+  onTaskResumeFailed: ({ record, event }) => {
+    console.error(record.task.id, event.status.message);
+  },
+});
+```
+
+Factory setup can also resume during agent creation:
+
+```typescript
+const agents = await createA2aAhpAgents({
+  runtime,
+  taskStore,
+  resume: {
+    enabled: true,
+    policy: 'non-terminal',
+  },
+});
+```
+
+Resume semantics:
+
+- non-terminal durable A2A tasks are resumed by default
+- the task keeps the same task ID, context ID, AHP session URI, provider, and
+  model
+- `tasks/get` works from the durable projection after restart
+- `tasks/resubscribe` yields current durable state, replayable projected
+  events, then live events
+- `message/send` to an existing task continues the same task/session
+- resume calls `AhpRuntime.resumeSession(...)`; the AHP client runtime
+  subscribes to the persisted session and exposes the AHP subscribe result
+  snapshot
+- AHP server/provider resume remains owned by AHP; `a2a-ahp` consumes the
+  resumed subscription and projects subsequent AHP actions back into A2A
+- resume failures are durably projected onto the A2A task as `failed` status
 
 ## MCP Status Tools
 

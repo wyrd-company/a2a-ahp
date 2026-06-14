@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import type { AgentInfo } from '@microsoft/agent-host-protocol';
 import type { Message } from '@a2a-js/sdk';
 
-import { createA2aAhpAgents, idForProviderModel, pathForProviderModel } from '../src/index.js';
+import { createA2aAhpAgents, idForProviderModel, InMemoryA2aTaskStore, pathForProviderModel, TaskProjector } from '../src/index.js';
 import { FakeAhpRuntime } from './fake-runtime.js';
 
 test('derives one A2A agent per allowed AHP provider/model pair', async () => {
@@ -68,6 +68,28 @@ test('supports transport-specific AgentCard URLs without an HTTP baseUrl', async
 
   assert.equal(agentInstance?.agentCard.url, 'nats://a2a.agent.gpt-5-codex.rpc');
   assert.equal(agentInstance?.agentCard.preferredTransport, 'NATS');
+});
+
+test('factory can resume durable tasks during agent setup', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const projector = new TaskProjector({ store });
+  const record = projector.ensureTask({
+    taskId: 'task-factory-resume-1',
+    contextId: 'ctx-factory-resume-1',
+    sessionUri: 'ahp-session:/factory-resume-1',
+    route: { provider: 'codex', model: { id: 'gpt-5-codex' } },
+  });
+  await projector.save(record);
+  const runtime = new FakeAhpRuntime([agent('codex', 'Codex', ['gpt-5-codex'])]);
+
+  await createA2aAhpAgents({
+    runtime,
+    taskStore: store,
+    resume: { enabled: true },
+  });
+
+  assert.equal(runtime.resumedSessions.length, 1);
+  assert.equal(runtime.resumedSessions[0]?.sessionUri, 'ahp-session:/factory-resume-1');
 });
 
 function agent(provider: string, displayName: string, models: string[]): AgentInfo {

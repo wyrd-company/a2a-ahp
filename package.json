@@ -1,6 +1,6 @@
 {
   "name": "@wyrd-company/a2a-ahp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agent2Agent (A2A) server adapter backed by an Agent Host Protocol client.",
   "type": "module",
   "license": "MIT",
@@ -40,7 +40,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@wyrd-company/ahp-server": "^0.1.0",
+    "@wyrd-company/ahp-server": "^0.3.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

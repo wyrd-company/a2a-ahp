@@ -5,6 +5,7 @@ import type {
   RootState,
   SessionModelInfo,
   StateAction,
+  SubscribeResult,
   ToolCallResult,
   ToolDefinition,
   URI,
@@ -32,6 +33,8 @@ export interface CreateSessionOptions {
   readonly model?: ModelSelection;
 }
 
+export interface ResumeSessionOptions extends CreateSessionOptions {}
+
 export interface TurnDispatch {
   readonly sessionUri: URI;
   readonly turnId: string;
@@ -47,6 +50,7 @@ export interface ToolCallCompletion {
 
 export interface AhpSessionSubscription {
   readonly sessionUri: URI;
+  readonly result: SubscribeResult;
   readonly events: AsyncIterableIterator<AhpRuntimeEvent>;
 }
 
@@ -59,6 +63,7 @@ export interface AhpRuntime {
   shutdown(): Promise<void>;
   listAgents(): Promise<readonly AhpAgentInfo[]>;
   createSession(options: CreateSessionOptions): Promise<void>;
+  resumeSession(options: ResumeSessionOptions): Promise<AhpSessionSubscription>;
   subscribe(sessionUri: URI): Promise<AhpSessionSubscription>;
   dispatchTurn(dispatch: TurnDispatch): void;
   cancelTurn(sessionUri: URI, turnId: string): void;
@@ -125,15 +130,25 @@ export class AhpClientRuntime implements AhpRuntime {
     this.createdSessions.add(options.sessionUri);
   }
 
+  async resumeSession(options: ResumeSessionOptions): Promise<AhpSessionSubscription> {
+    await this.start();
+    return this.subscribeSession(options.sessionUri);
+  }
+
   async subscribe(sessionUri: URI): Promise<AhpSessionSubscription> {
     await this.start();
-    const { subscription } = this.subscribedSessions.has(sessionUri)
-      ? { subscription: this.client.attachSubscription(sessionUri) }
+    return this.subscribeSession(sessionUri);
+  }
+
+  private async subscribeSession(sessionUri: URI): Promise<AhpSessionSubscription> {
+    const { result, subscription } = this.subscribedSessions.has(sessionUri)
+      ? { result: {} as SubscribeResult, subscription: this.client.attachSubscription(sessionUri) }
       : await this.client.subscribe(sessionUri);
     this.subscribedSessions.add(sessionUri);
 
     return {
       sessionUri,
+      result,
       events: mapSubscriptionEvents(sessionUri, subscription),
     };
   }

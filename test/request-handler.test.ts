@@ -130,6 +130,28 @@ test('tasks/get hydrates task projection from a durable task store', async () =>
   assert.equal(record?.route?.model?.id, 'model-a');
 });
 
+test('message/send to an existing durable task resumes the AHP session instead of recreating it', async () => {
+  const store = new InMemoryA2aTaskStore();
+  const writerRuntime = new FakeAhpRuntime();
+  const writer = new A2aAhpRequestHandler({
+    runtime: writerRuntime,
+    taskStore: store,
+    route: { provider: 'provider-a', model: { id: 'model-a' } },
+  });
+  await writer.sendMessage({ message: userMessage('task-store-resume', 'ctx-store-resume', 'First') });
+
+  const runtime = new FakeAhpRuntime();
+  const reader = new A2aAhpRequestHandler({ runtime, taskStore: store });
+  await reader.sendMessage({ message: userMessage('task-store-resume', 'ctx-store-resume', 'Second') });
+
+  assert.equal(runtime.createdSessions.length, 0);
+  assert.equal(runtime.resumedSessions.length, 1);
+  assert.equal(runtime.resumedSessions[0]?.sessionUri, sessionUriForTask('task-store-resume'));
+  assert.equal(runtime.resumedSessions[0]?.provider, 'provider-a');
+  assert.deepEqual(runtime.resumedSessions[0]?.model, { id: 'model-a' });
+  assert.equal(runtime.dispatchedTurns.length, 1);
+});
+
 test('tasks/resubscribe replays persisted stream updates before future events', async () => {
   const store = new InMemoryA2aTaskStore();
   const runtime = new FakeAhpRuntime();

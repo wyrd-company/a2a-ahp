@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { TaskState } from '@a2a-js/sdk';
 import {
   InMemoryA2aTaskStore,
+  STRUCTURED_ASK_METADATA_KEY,
   postStatusSchema,
   publishArtifactSchema,
   requestInputSchema,
@@ -12,6 +14,7 @@ import {
   TaskProjector,
   type ToolContextResolver,
 } from '../src/index.js';
+import { textFromMessage } from './a2a-helpers.js';
 
 test('MCP post_status updates the projected A2A task status/activity', async () => {
   const { projector, service } = serviceForSession('ahp-session:/status-1');
@@ -23,12 +26,8 @@ test('MCP post_status updates the projected A2A task status/activity', async () 
 
   const event = await service.postStatus({ state: 'working', message: 'Running', activity: 'thinking' });
 
-  assert.equal(event.status.state, 'working');
-  assert.equal(record.task.status.message?.parts[0]?.kind, 'text');
-  assert.equal(
-    record.task.status.message?.parts[0]?.kind === 'text' ? record.task.status.message.parts[0].text : '',
-    'Running',
-  );
+  assert.equal(event.status?.state, TaskState.TASK_STATE_WORKING);
+  assert.equal(textFromMessage(record.task.status?.message), 'Running');
 });
 
 test('MCP publish_artifact adds an A2A artifact update', async () => {
@@ -41,17 +40,38 @@ test('MCP publish_artifact adds an A2A artifact update', async () => {
 
   const event = await service.publishArtifact({ artifactId: 'artifact-1', text: 'artifact body' });
 
-  assert.equal(event.kind, 'artifact-update');
+  assert.equal(event.artifact?.artifactId, 'artifact-1');
   assert.equal(record.task.artifacts?.length, 1);
   assert.equal(record.task.artifacts?.[0]?.artifactId, 'artifact-1');
 });
 
-test('MCP request_input moves the projected task to input-required', async () => {
+test('MCP request_input moves the projected task to input-required with structured ask metadata', async () => {
   const { service } = serviceForSession('ahp-session:/status-3');
+
+  const event = await service.requestInput({
+    prompt: 'Need approval',
+    options: [{ id: 'approve', label: 'Approve' }],
+    allowFreeText: false,
+  });
+
+  assert.equal(event.status?.state, TaskState.TASK_STATE_INPUT_REQUIRED);
+  assert.deepEqual(event.metadata?.[STRUCTURED_ASK_METADATA_KEY], {
+    prompt: 'Need approval',
+    options: [{ id: 'approve', label: 'Approve' }],
+    allowFreeText: false,
+  });
+});
+
+test('MCP request_input accepts bare prompt and defaults free text', async () => {
+  const { service } = serviceForSession('ahp-session:/status-3-bare');
 
   const event = await service.requestInput({ prompt: 'Need approval' });
 
-  assert.equal(event.status.state, 'input-required');
+  assert.equal(event.status?.state, TaskState.TASK_STATE_INPUT_REQUIRED);
+  assert.deepEqual(event.metadata?.[STRUCTURED_ASK_METADATA_KEY], {
+    prompt: 'Need approval',
+    allowFreeText: true,
+  });
 });
 
 test('status tool schemas do not require caller-supplied task or session correlation', () => {
@@ -85,7 +105,7 @@ test('status tools reject calls without trusted context unless isolated fallback
     },
   });
   const event = await fallbackService.postStatus({ state: 'working' });
-  assert.equal(event.status.state, 'working');
+  assert.equal(event.status?.state, TaskState.TASK_STATE_WORKING);
 });
 
 test('status tools hydrate task correlation from the task store by trusted session context', async () => {
@@ -110,7 +130,7 @@ test('status tools hydrate task correlation from the task store by trusted sessi
   assert.equal(event.taskId, 'task-s5');
   assert.equal(event.contextId, 'ctx-s5');
   assert.equal(saved?.correlation.activeTurnId, 'turn-5');
-  assert.equal(saved?.task.status.state, 'working');
+  assert.equal(saved?.task.status?.state, TaskState.TASK_STATE_WORKING);
 });
 
 function serviceForSession(sessionUri: string): { projector: TaskProjector; service: StatusToolService } {

@@ -3,10 +3,10 @@ import type {
   Message,
   Task,
   TaskArtifactUpdateEvent,
-  TaskState,
   TaskStatus,
   TaskStatusUpdateEvent,
 } from '@a2a-js/sdk';
+import { TaskState } from '@a2a-js/sdk';
 import type { ModelSelection, StateAction, URI } from '@microsoft/agent-host-protocol';
 import { randomUUID } from 'node:crypto';
 
@@ -16,8 +16,10 @@ import {
   isTerminalTaskState,
   toArtifactEvent,
   toStatusEvent,
+  textPart,
   type ProjectionEvent,
 } from '../mappers/ahp-to-a2a.js';
+import { STRUCTURED_ASK_METADATA_KEY, type StructuredAsk } from '../structured-ask.js';
 import type { A2aTaskStore } from './task-store.js';
 
 export interface TaskCorrelation {
@@ -84,6 +86,7 @@ export interface InputRequestInput {
   readonly sessionUri: URI;
   readonly turnId?: string;
   readonly prompt: string;
+  readonly ask: StructuredAsk;
 }
 
 export interface TaskProjectorOptions {
@@ -131,12 +134,12 @@ export class TaskProjector {
       streamEvents: [],
       currentAssistantMessageId: randomUUID(),
       task: {
-        kind: 'task',
         id: taskId,
         contextId,
-        status: this.status('submitted'),
+        status: this.status(TaskState.TASK_STATE_SUBMITTED),
         history: [],
         artifacts: [],
+        metadata: undefined,
       },
     };
 
@@ -149,10 +152,10 @@ export class TaskProjector {
     const snapshot = cloneRecord(record);
     snapshot.streamEvents = snapshot.streamEvents ?? [];
     snapshot.metadata = snapshot.metadata ?? {
-      createdAt: snapshot.task.status.timestamp ?? new Date().toISOString(),
-      updatedAt: snapshot.task.status.timestamp ?? new Date().toISOString(),
+      createdAt: snapshot.task.status?.timestamp ?? new Date().toISOString(),
+      updatedAt: snapshot.task.status?.timestamp ?? new Date().toISOString(),
       sequence: 0,
-      terminal: isTerminalTaskState(snapshot.task.status.state),
+      terminal: isTerminalTaskState(snapshot.task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED),
     };
     this.index(snapshot);
     return snapshot;
@@ -195,14 +198,14 @@ export class TaskProjector {
       case 'session/turnStarted':
         record.correlation.activeTurnId = (action as { turnId: string }).turnId;
         record.currentAssistantMessageId = randomUUID();
-        this.setStatus(record, 'working');
+        this.setStatus(record, TaskState.TASK_STATE_WORKING);
         events = [toStatusEvent(record)];
         break;
 
       case 'session/responsePart':
         record.currentAssistantMessageId = record.currentAssistantMessageId || randomUUID();
         assistantMessageFor(record);
-        this.setStatus(record, 'working');
+        this.setStatus(record, TaskState.TASK_STATE_WORKING);
         events = [toStatusEvent(record)];
         break;
 
@@ -210,32 +213,32 @@ export class TaskProjector {
         const delta = action as { content?: string };
         const message = assistantMessageFor(record);
         appendText(message, delta.content ?? '');
-        this.setStatus(record, 'working', message);
+        this.setStatus(record, TaskState.TASK_STATE_WORKING, message);
         events = [toStatusEvent(record)];
         break;
       }
 
       case 'session/inputRequested':
-        this.setStatus(record, 'input-required');
+        this.setStatus(record, TaskState.TASK_STATE_INPUT_REQUIRED);
         events = [toStatusEvent(record)];
         break;
 
       case 'session/turnComplete':
-        this.setStatus(record, 'completed', assistantMessageFor(record));
+        this.setStatus(record, TaskState.TASK_STATE_COMPLETED, assistantMessageFor(record));
         record.correlation.activeTurnId = undefined;
-        events = [toStatusEvent(record, true)];
+        events = [toStatusEvent(record)];
         break;
 
       case 'session/turnCancelled':
-        this.setStatus(record, 'canceled');
+        this.setStatus(record, TaskState.TASK_STATE_CANCELED);
         record.correlation.activeTurnId = undefined;
-        events = [toStatusEvent(record, true)];
+        events = [toStatusEvent(record)];
         break;
 
       case 'session/error':
-        this.setStatus(record, 'failed', makeAgentMessage(record, errorMessageFromAction(action)));
+        this.setStatus(record, TaskState.TASK_STATE_FAILED, makeAgentMessage(record, errorMessageFromAction(action)));
         record.correlation.activeTurnId = undefined;
-        events = [toStatusEvent(record, true)];
+        events = [toStatusEvent(record)];
         break;
 
       default:
@@ -249,10 +252,10 @@ export class TaskProjector {
   updateStatus(input: StatusUpdateInput): TaskStatusUpdateEvent {
     const record = this.requireBySessionUri(input.sessionUri);
     if (input.turnId) record.correlation.activeTurnId = input.turnId;
-    const state = input.state ?? record.task.status.state;
-    const message = input.text ? makeAgentMessage(record, input.text) : record.task.status.message;
-    this.setStatus(record, state, message, input.activity);
-    const event = toStatusEvent(record, isTerminalTaskState(state));
+    const state = input.state ?? record.task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED;
+    const message = input.text ? makeAgentMessage(record, input.text) : record.task.status?.message;
+    this.setStatus(record, state, message);
+    const event = toStatusEvent(record, input.activity ? { activity: input.activity } : undefined);
     this.recordEvents(record, [event]);
     return event;
   }
@@ -260,8 +263,8 @@ export class TaskProjector {
   requestInput(input: InputRequestInput): TaskStatusUpdateEvent {
     const record = this.requireBySessionUri(input.sessionUri);
     if (input.turnId) record.correlation.activeTurnId = input.turnId;
-    this.setStatus(record, 'input-required', makeAgentMessage(record, input.prompt));
-    const event = toStatusEvent(record);
+    this.setStatus(record, TaskState.TASK_STATE_INPUT_REQUIRED, makeAgentMessage(record, input.prompt));
+    const event = toStatusEvent(record, { [STRUCTURED_ASK_METADATA_KEY]: input.ask });
     this.recordEvents(record, [event]);
     return event;
   }
@@ -271,10 +274,11 @@ export class TaskProjector {
     if (input.turnId) record.correlation.activeTurnId = input.turnId;
     const artifact: Artifact = {
       artifactId: input.artifactId ?? randomUUID(),
-      ...(input.name ? { name: input.name } : {}),
-      ...(input.description ? { description: input.description } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      parts: [{ kind: 'text', text: input.text ?? '' }],
+      name: input.name ?? '',
+      description: input.description ?? '',
+      metadata: input.metadata,
+      parts: [textPart(input.text ?? '')],
+      extensions: [],
     };
     record.task.artifacts = upsertArtifact(record.task.artifacts ?? [], artifact);
     this.touch(record);
@@ -293,6 +297,10 @@ export class TaskProjector {
 
   replayableStreamEvents(record: TaskRecord): ProjectionEvent[] {
     return cloneEvents(record.streamEvents.map(entry => entry.event));
+  }
+
+  records(): TaskRecord[] {
+    return [...this.byTaskId.values()].map(record => cloneRecord(record));
   }
 
   private find(options: CreateTaskOptions): TaskRecord | undefined {
@@ -329,18 +337,17 @@ export class TaskProjector {
     this.touch(record);
   }
 
-  private setStatus(record: TaskRecord, state: TaskState, message?: Message, activity?: string): void {
-    record.task.status = this.status(state, message, activity);
+  private setStatus(record: TaskRecord, state: TaskState, message?: Message): void {
+    record.task.status = this.status(state, message);
     this.touch(record);
   }
 
-  private status(state: TaskState, message?: Message, activity?: string): TaskStatus {
+  private status(state: TaskState, message?: Message): TaskStatus {
     return {
       state,
       timestamp: new Date().toISOString(),
-      ...(message ? { message } : {}),
-      ...(activity ? { metadata: { activity } } : {}),
-    } as TaskStatus;
+      message,
+    };
   }
 
   private requireBySessionUri(sessionUri: URI): TaskRecord {
@@ -363,7 +370,7 @@ export class TaskProjector {
   private touch(record: TaskRecord): void {
     record.metadata.sequence += 1;
     record.metadata.updatedAt = new Date().toISOString();
-    record.metadata.terminal = isTerminalTaskState(record.task.status.state);
+    record.metadata.terminal = isTerminalTaskState(record.task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED);
   }
 }
 
@@ -372,21 +379,21 @@ export function sessionUriForTask(taskId: string): URI {
 }
 
 function appendText(message: Message, text: string): void {
-  const firstText = message.parts.find(part => part.kind === 'text');
-  if (firstText?.kind === 'text') {
-    firstText.text += text;
+  const firstText = message.parts.find(part => part.content?.$case === 'text');
+  if (firstText?.content?.$case === 'text') {
+    firstText.content.value += text;
     return;
   }
-  message.parts.push({ kind: 'text', text });
+  message.parts.push(textPart(text));
 }
 
 function makeAgentMessage(record: TaskRecord, text: string): Message {
   const message = assistantMessageFor(record);
-  const firstText = message.parts.find(part => part.kind === 'text');
-  if (firstText?.kind === 'text') {
-    firstText.text = text;
+  const firstText = message.parts.find(part => part.content?.$case === 'text');
+  if (firstText?.content?.$case === 'text') {
+    firstText.content.value = text;
   } else {
-    message.parts = [{ kind: 'text', text }];
+    message.parts = [textPart(text)];
   }
   return message;
 }

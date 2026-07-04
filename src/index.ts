@@ -76,3 +76,16 @@ export type {
   ToolContextResolver,
   TrustedToolContext,
 } from './mcp/status-server.js';
+
+export {
+  STRUCTURED_ASK_ANSWER_METADATA_KEY,
+  STRUCTURED_ASK_METADATA_KEY,
+  normalizeStructuredAsk,
+  renderStructuredAnswer,
+  structuredAnswerFromMessage,
+} from './structured-ask.js';
+export type {
+  StructuredAnswer,
+  StructuredAsk,
+  StructuredAskOption,
+} from './structured-ask.js';

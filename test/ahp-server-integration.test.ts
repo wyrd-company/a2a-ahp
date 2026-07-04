@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 
-import type { Message as A2aMessage } from '@a2a-js/sdk';
+import { Role, TaskState, type Message as A2aMessage } from '@a2a-js/sdk';
 import type { AgentInfo, Message, StateAction } from '@microsoft/agent-host-protocol';
 import {
   AhpServer,
@@ -20,6 +20,7 @@ import {
 } from '@wyrd-company/ahp-server';
 
 import { AhpClientRuntime, A2aAhpRequestHandler, InMemoryA2aTaskStore, createA2aAhpAgents } from '../src/index.js';
+import { sendMessageRequest, statusFromStream, textFromMessage, userMessage } from './a2a-helpers.js';
 
 test('uses an existing in-process AHP server instance as the adapter runtime', async () => {
   const server = new AhpServer({ providers: [createEchoProvider()] });
@@ -39,15 +40,11 @@ test('uses an existing in-process AHP server instance as the adapter runtime', a
     assert.equal(agents[0]?.id, 'echo-echo');
 
     const result = await agents[0]!.requestHandler.sendMessage({
-      message: userMessage('task-1', 'ctx-1', 'Hello AHP'),
-      configuration: { blocking: true },
+      ...sendMessageRequest(userMessage('task-1', 'ctx-1', 'Hello AHP')),
     });
 
-    assert.equal((result as A2aMessage).kind, 'message');
-    assert.equal((result as A2aMessage).role, 'agent');
-    const part = (result as A2aMessage).parts[0];
-    assert.equal(part?.kind, 'text');
-    assert.equal(part?.kind === 'text' ? part.text : '', 'Echo: Hello AHP');
+    assert.equal((result as A2aMessage).role, Role.ROLE_AGENT);
+    assert.equal(textFromMessage(result as A2aMessage), 'Echo: Hello AHP');
   } finally {
     await runtime.shutdown();
     await inProcess.close();
@@ -69,7 +66,7 @@ test('handles forwarded AHP active-client status tools end to end', async () => 
       baseUrl: 'https://agents.example',
     });
     const stream = agents[0]!.requestHandler.sendMessageStream({
-      message: userMessage('task-tools', 'ctx-tools', 'Report progress'),
+      ...sendMessageRequest(userMessage('task-tools', 'ctx-tools', 'Report progress')),
     });
 
     const events = [];
@@ -78,10 +75,8 @@ test('handles forwarded AHP active-client status tools end to end', async () => 
     }
 
     const status = events.find(event =>
-      event.kind === 'status-update' &&
-      event.status.state === 'working' &&
-      event.status.message?.parts[0]?.kind === 'text' &&
-      event.status.message.parts[0].text.includes('Installing dependencies')
+      statusFromStream(event)?.status?.state === TaskState.TASK_STATE_WORKING &&
+      textFromMessage(statusFromStream(event)?.status?.message).includes('Installing dependencies')
     );
 
     assert.ok(status);
@@ -114,8 +109,7 @@ test('continues an existing A2A task through ahp-server persisted session resume
     });
 
     await firstHandler.sendMessage({
-      message: userMessage('task-resume-server', 'ctx-resume-server', 'First'),
-      configuration: { blocking: true },
+      ...sendMessageRequest(userMessage('task-resume-server', 'ctx-resume-server', 'First')),
     });
     await firstRuntime.shutdown();
     await firstTransport.close();
@@ -136,15 +130,12 @@ test('continues an existing A2A task through ahp-server persisted session resume
     });
 
     const result = await secondHandler.sendMessage({
-      message: userMessage('task-resume-server', 'ctx-resume-server', 'Second'),
-      configuration: { blocking: true },
+      ...sendMessageRequest(userMessage('task-resume-server', 'ctx-resume-server', 'Second')),
     });
 
     assert.equal(provider.resumedSessionUri, 'ahp-session:/a2a/task-resume-server');
     assert.deepEqual(provider.resumedResumeState, { nativeSessionId: 'a2a-native-session-1' });
-    const part = (result as A2aMessage).parts[0];
-    assert.equal(part?.kind, 'text');
-    assert.equal(part?.kind === 'text' ? part.text : '', 'Resumed Echo: Second');
+    assert.equal(textFromMessage(result as A2aMessage), 'Resumed Echo: Second');
 
     const persisted = new FileSystemSessionStore({ directory }).getSession('ahp-session:/a2a/task-resume-server');
     assert.deepEqual(persisted?.providerResumeState, { nativeSessionId: 'a2a-native-session-2' });
@@ -329,15 +320,4 @@ class StatusToolSession implements AgentSession {
 
 function createStatusToolProvider(): StatusToolProvider {
   return new StatusToolProvider();
-}
-
-function userMessage(taskId: string, contextId: string, text: string): A2aMessage {
-  return {
-    kind: 'message',
-    role: 'user',
-    messageId: `${taskId}-message`,
-    taskId,
-    contextId,
-    parts: [{ kind: 'text', text }],
-  };
 }

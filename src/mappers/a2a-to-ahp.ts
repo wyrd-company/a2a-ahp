@@ -11,7 +11,7 @@ export function a2aMessageToAhpMessage(message: A2aMessage): AhpMessage {
 export function textFromA2aParts(parts: readonly Part[] | undefined): string {
   if (!parts) return '';
   return parts
-    .filter(part => part.kind === 'text')
-    .map(part => part.text)
+    .filter(part => part.content?.$case === 'text')
+    .map(part => part.content?.$case === 'text' ? part.content.value : '')
     .join('\n');
 }

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { TaskState } from '@a2a-js/sdk';
 import type { StateAction } from '@microsoft/agent-host-protocol';
 
 import { InMemoryA2aTaskStore, TaskProjector } from '../src/index.js';
+import { textFromMessage } from './a2a-helpers.js';
 
 test('projects AHP response delta and completion into A2A task state', () => {
   const projector = new TaskProjector();
@@ -25,14 +27,9 @@ test('projects AHP response delta and completion into A2A task state', () => {
     turnId: 'turn-1',
   } as StateAction);
 
-  assert.equal(record.task.status.state, 'completed');
-  assert.equal(record.task.status.message?.parts[0]?.kind, 'text');
-  assert.equal(
-    record.task.status.message?.parts[0]?.kind === 'text' ? record.task.status.message.parts[0].text : '',
-    'projected text',
-  );
-  assert.equal(final[0]?.kind, 'status-update');
-  assert.equal(final[0]?.kind === 'status-update' ? final[0].final : false, true);
+  assert.equal(record.task.status?.state, TaskState.TASK_STATE_COMPLETED);
+  assert.equal(textFromMessage(record.task.status?.message), 'projected text');
+  assert.equal('status' in final[0]! ? final[0].status?.state : undefined, TaskState.TASK_STATE_COMPLETED);
 });
 
 test('projects AHP error and cancellation into terminal A2A states', () => {
@@ -50,8 +47,8 @@ test('projects AHP error and cancellation into terminal A2A states', () => {
     turnId: 'turn-1',
   } as StateAction);
 
-  assert.equal(failed.task.status.state, 'failed');
-  assert.equal(canceled.task.status.state, 'canceled');
+  assert.equal(failed.task.status?.state, TaskState.TASK_STATE_FAILED);
+  assert.equal(canceled.task.status?.state, TaskState.TASK_STATE_CANCELED);
 });
 
 test('persists and hydrates task projection records through the task store', async () => {

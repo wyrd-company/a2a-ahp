@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { AgentInfo } from '@microsoft/agent-host-protocol';
-import type { Message } from '@a2a-js/sdk';
 
 import { createA2aAhpAgents, idForProviderModel, InMemoryA2aTaskStore, pathForProviderModel, TaskProjector } from '../src/index.js';
+import { sendMessageRequest, userMessage } from './a2a-helpers.js';
 import { FakeAhpRuntime } from './fake-runtime.js';
 
 test('derives one A2A agent per allowed AHP provider/model pair', async () => {
@@ -31,7 +31,7 @@ test('derives one A2A agent per allowed AHP provider/model pair', async () => {
   );
   assert.equal(agents[0]?.id, 'codex-gpt-5-codex');
   assert.equal(agents[0]?.path, '/a2a/codex/gpt-5-codex');
-  assert.equal(agents[0]?.agentCard.url, 'https://agents.example/a2a/codex/gpt-5-codex');
+  assert.equal(agents[0]?.agentCard.supportedInterfaces[0]?.url, 'https://agents.example/a2a/codex/gpt-5-codex');
   assert.equal(agents[0]?.agentCard.name, 'Codex - gpt-5-codex');
 });
 
@@ -43,7 +43,7 @@ test('generated handlers route task session creation to their AHP provider/model
   });
   assert.ok(instance);
 
-  await instance.requestHandler.sendMessage({ message: userMessage('task-factory-1', 'ctx-factory-1', 'Hello') });
+  await instance.requestHandler.sendMessage(sendMessageRequest(userMessage('task-factory-1', 'ctx-factory-1', 'Hello'), { returnImmediately: true }));
 
   assert.equal(runtime.createdSessions.length, 1);
   assert.equal(runtime.createdSessions[0]?.provider, 'codex');
@@ -62,12 +62,17 @@ test('supports transport-specific AgentCard URLs without an HTTP baseUrl', async
     runtime,
     agentCardUrl: (_route, _agent, model) => `nats://a2a.agent.${model.id}.rpc`,
     agentCardOverrides: {
-      preferredTransport: 'NATS',
+      supportedInterfaces: [{
+        url: 'nats://override',
+        protocolBinding: 'NATS',
+        protocolVersion: '1.0',
+        tenant: '',
+      }],
     },
   });
 
-  assert.equal(agentInstance?.agentCard.url, 'nats://a2a.agent.gpt-5-codex.rpc');
-  assert.equal(agentInstance?.agentCard.preferredTransport, 'NATS');
+  assert.equal(agentInstance?.agentCard.supportedInterfaces[0]?.url, 'nats://override');
+  assert.equal(agentInstance?.agentCard.supportedInterfaces[0]?.protocolBinding, 'NATS');
 });
 
 test('factory can resume durable tasks during agent setup', async () => {
@@ -102,16 +107,5 @@ function agent(provider: string, displayName: string, models: string[]): AgentIn
       provider,
       name: id,
     })),
-  };
-}
-
-function userMessage(taskId: string, contextId: string, text: string): Message {
-  return {
-    kind: 'message',
-    role: 'user',
-    messageId: `${taskId}-message`,
-    taskId,
-    contextId,
-    parts: [{ kind: 'text', text }],
   };
 }

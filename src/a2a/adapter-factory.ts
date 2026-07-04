@@ -128,11 +128,14 @@ function deriveAgentCard(options: {
 }): AgentCard {
   const skill = skillForProviderModel(options.agent, options.model);
   const base: AgentCard = {
-    protocolVersion: '0.3.0',
     name: `${options.agent.displayName} - ${options.model.name}`,
     description: options.agent.description,
-    url: options.url,
-    preferredTransport: 'JSONRPC',
+    supportedInterfaces: [{
+      url: options.url,
+      protocolBinding: 'JSONRPC',
+      protocolVersion: '1.0',
+      tenant: '',
+    }],
     version: '0.1.0',
     provider: {
       organization: options.agent.displayName,
@@ -140,12 +143,16 @@ function deriveAgentCard(options: {
     },
     capabilities: {
       streaming: true,
-      stateTransitionHistory: true,
       pushNotifications: false,
+      extendedAgentCard: false,
+      extensions: [],
     },
+    securitySchemes: {},
+    securityRequirements: [],
     defaultInputModes: ['text/plain'],
     defaultOutputModes: ['text/plain'],
     skills: [skill],
+    signatures: [],
   };
   return {
     ...base,
@@ -160,6 +167,10 @@ function skillForProviderModel(agent: AhpAgentInfo, model: AhpModelInfo): AgentS
     name: `${agent.displayName} ${model.name}`,
     description: `Routes tasks to AHP provider ${agent.provider} using model ${model.id}.`,
     tags: ['a2a', 'ahp', agent.provider, model.id],
+    examples: [],
+    inputModes: ['text/plain'],
+    outputModes: ['text/plain'],
+    securityRequirements: [],
   };
 }
 

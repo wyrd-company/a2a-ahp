@@ -5,10 +5,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
-import type { TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { TaskState, type TaskArtifactUpdateEvent, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { ToolDefinition, URI } from '@microsoft/agent-host-protocol';
 
 import type { TaskProjector } from '../projection/task-projector.js';
+import { normalizeStructuredAsk } from '../structured-ask.js';
 
 export interface TrustedToolContext {
   readonly sessionUri: URI;
@@ -53,7 +54,7 @@ export class StatusToolService {
     const event = this.projector.updateStatus({
       sessionUri: context.sessionUri,
       turnId: context.turnId,
-      state: input.state,
+      state: input.state ? taskStateFromInput(input.state) : undefined,
       text: input.message,
       activity: input.activity,
     });
@@ -68,6 +69,7 @@ export class StatusToolService {
       sessionUri: context.sessionUri,
       turnId: context.turnId,
       prompt: input.prompt,
+      ask: normalizeStructuredAsk(input),
     });
     await this.saveContextRecord(context.sessionUri);
     return event;
@@ -135,6 +137,13 @@ export const postStatusSchema = z.object({
 
 export const requestInputSchema = z.object({
   prompt: z.string(),
+  options: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    description: z.string().optional(),
+  })).optional(),
+  allowFreeText: z.boolean().optional(),
+  role: z.string().optional(),
 });
 
 export const publishArtifactSchema = z.object({
@@ -149,7 +158,7 @@ export const setActivitySchema = z.object({
   activity: z.string().optional(),
 });
 
-export type PostStatusInput = z.infer<typeof postStatusSchema> & { readonly state?: TaskState };
+export type PostStatusInput = z.infer<typeof postStatusSchema>;
 export type RequestInputInput = z.infer<typeof requestInputSchema>;
 export type PublishArtifactInput = z.infer<typeof publishArtifactSchema>;
 export type SetActivityInput = z.infer<typeof setActivitySchema>;
@@ -257,4 +266,27 @@ function toolResult(event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent): {
       },
     ],
   };
+}
+
+function taskStateFromInput(state: NonNullable<PostStatusInput['state']>): TaskState {
+  switch (state) {
+    case 'submitted':
+      return TaskState.TASK_STATE_SUBMITTED;
+    case 'working':
+      return TaskState.TASK_STATE_WORKING;
+    case 'input-required':
+      return TaskState.TASK_STATE_INPUT_REQUIRED;
+    case 'completed':
+      return TaskState.TASK_STATE_COMPLETED;
+    case 'canceled':
+      return TaskState.TASK_STATE_CANCELED;
+    case 'failed':
+      return TaskState.TASK_STATE_FAILED;
+    case 'rejected':
+      return TaskState.TASK_STATE_REJECTED;
+    case 'auth-required':
+      return TaskState.TASK_STATE_AUTH_REQUIRED;
+    case 'unknown':
+      return TaskState.TASK_STATE_UNSPECIFIED;
+  }
 }

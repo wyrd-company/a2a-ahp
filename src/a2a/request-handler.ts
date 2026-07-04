@@ -1,25 +1,35 @@
 import type {
   AgentCard,
-  DeleteTaskPushNotificationConfigParams,
-  GetTaskPushNotificationConfigParams,
-  ListTaskPushNotificationConfigParams,
+  CancelTaskRequest,
+  DeleteTaskPushNotificationConfigRequest,
+  GetExtendedAgentCardRequest,
+  GetTaskPushNotificationConfigRequest,
+  ListTaskPushNotificationConfigsRequest,
+  ListTaskPushNotificationConfigsResponse,
+  ListTasksRequest,
+  ListTasksResponse,
   Message,
-  MessageSendParams,
+  SendMessageRequest,
+  StreamResponse,
   Task,
   TaskArtifactUpdateEvent,
-  TaskIdParams,
   TaskPushNotificationConfig,
-  TaskQueryParams,
   TaskStatusUpdateEvent,
 } from '@a2a-js/sdk';
+import { TaskState } from '@a2a-js/sdk';
 import type { A2ARequestHandler, ServerCallContext } from '@a2a-js/sdk/server';
-import { A2AError } from '@a2a-js/sdk/server';
+import {
+  PushNotificationNotSupportedError,
+  RequestMalformedError,
+  TaskNotCancelableError,
+  TaskNotFoundError,
+} from '@a2a-js/sdk/server';
 import { randomUUID } from 'node:crypto';
 
 import type { AhpRuntime, AhpRuntimeEvent } from '../ahp/runtime.js';
 import { ToolResultContentType, type ModelSelection, type StateAction, type ToolCallResult } from '@microsoft/agent-host-protocol';
-import { a2aMessageToAhpMessage } from '../mappers/a2a-to-ahp.js';
-import { isTerminalTaskState } from '../mappers/ahp-to-a2a.js';
+import { a2aMessageToAhpMessage, textFromA2aParts } from '../mappers/a2a-to-ahp.js';
+import { isInterruptedTaskState, isTerminalTaskState } from '../mappers/ahp-to-a2a.js';
 import {
   StatusToolService,
   type PostStatusInput,
@@ -29,6 +39,11 @@ import {
 } from '../mcp/status-server.js';
 import type { A2aTaskStore } from '../projection/task-store.js';
 import { sessionUriForTask, TaskProjector, type TaskRecord } from '../projection/task-projector.js';
+import {
+  renderStructuredAnswer,
+  structuredAnswerFromMessage,
+  type StructuredAnswer,
+} from '../structured-ask.js';
 
 export interface AhpSessionRoute {
   readonly provider: string;
@@ -49,6 +64,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
   private readonly agentCard: AgentCard;
   private readonly route?: AhpSessionRoute;
   private readonly activeToolCalls = new Map<string, StatusToolName>();
+  private readonly pendingInputRequests = new Map<string, PendingInputRequest>();
 
   constructor(options: A2aAhpRequestHandlerOptions) {
     this.runtime = options.runtime;
@@ -61,22 +77,22 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     return this.agentCard;
   }
 
-  async getAuthenticatedExtendedAgentCard(_context?: ServerCallContext): Promise<AgentCard> {
+  async getAuthenticatedExtendedAgentCard(_params: GetExtendedAgentCardRequest, _context?: ServerCallContext): Promise<AgentCard> {
     return this.agentCard;
   }
 
-  async sendMessage(params: MessageSendParams, _context?: ServerCallContext): Promise<Message | Task> {
+  async sendMessage(params: SendMessageRequest, _context?: ServerCallContext): Promise<Message | Task> {
     const { record, subscription } = await this.setupTurn(params);
-    if (!params.configuration?.blocking) {
+    if (params.configuration?.returnImmediately) {
       return this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
     }
 
     for await (const event of subscription.events) {
       await this.projectRuntimeEvent(event);
-      if (record.task.status.state === 'completed') {
+      if (record.task.status?.state === TaskState.TASK_STATE_COMPLETED) {
         return record.task.status.message ?? this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
       }
-      if (isTerminalTaskState(record.task.status.state)) {
+      if (record.task.status && (isTerminalTaskState(record.task.status.state) || isInterruptedTaskState(record.task.status.state))) {
         return this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
       }
     }
@@ -85,31 +101,33 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
   }
 
   async *sendMessageStream(
-    params: MessageSendParams,
+    params: SendMessageRequest,
     _context?: ServerCallContext,
-  ): AsyncGenerator<Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
+  ): AsyncGenerator<StreamResponse, void, undefined> {
     const { record, subscription } = await this.setupTurn(params);
-    yield this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength);
+    yield streamResponse('task', this.projector.taskWithHistoryLimit(record, params.configuration?.historyLength));
 
     for await (const event of subscription.events) {
       for (const projected of await this.projectRuntimeEvent(event)) {
-        yield projected;
-        if (projected.kind === 'status-update' && projected.final) return;
+        yield streamResponseForProjection(projected);
+        if (isStoppingStatusUpdate(projected)) return;
       }
     }
   }
 
-  async getTask(params: TaskQueryParams, _context?: ServerCallContext): Promise<Task> {
+  async getTask(params: { id: string; historyLength?: number }, _context?: ServerCallContext): Promise<Task> {
     const record = await this.projector.loadByTaskId(params.id);
-    if (!record) throw A2AError.taskNotFound(params.id);
+    if (!record) throw new TaskNotFoundError(`Task not found: ${params.id}`);
     return this.projector.taskWithHistoryLimit(record, params.historyLength);
   }
 
-  async cancelTask(params: TaskIdParams, _context?: ServerCallContext): Promise<Task> {
+  async cancelTask(params: CancelTaskRequest, _context?: ServerCallContext): Promise<Task> {
     const record = await this.projector.loadByTaskId(params.id);
-    if (!record) throw A2AError.taskNotFound(params.id);
+    if (!record) throw new TaskNotFoundError(`Task not found: ${params.id}`);
     const turnId = record.correlation.activeTurnId;
-    if (!turnId || isTerminalTaskState(record.task.status.state)) throw A2AError.taskNotCancelable(params.id);
+    if (!turnId || (record.task.status && isTerminalTaskState(record.task.status.state))) {
+      throw new TaskNotCancelableError(`Task is not cancelable: ${params.id}`);
+    }
     this.runtime.cancelTurn(record.correlation.sessionUri, turnId);
     this.projector.projectAction(record.correlation.sessionUri, {
       type: 'session/turnCancelled',
@@ -119,64 +137,87 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     return this.projector.taskWithHistoryLimit(record);
   }
 
-  async setTaskPushNotificationConfig(
+  async createTaskPushNotificationConfig(
     _params: TaskPushNotificationConfig,
     _context?: ServerCallContext,
   ): Promise<TaskPushNotificationConfig> {
-    throw A2AError.pushNotificationNotSupported();
+    throw new PushNotificationNotSupportedError();
   }
 
   async getTaskPushNotificationConfig(
-    _params: TaskIdParams | GetTaskPushNotificationConfigParams,
+    _params: GetTaskPushNotificationConfigRequest,
     _context?: ServerCallContext,
   ): Promise<TaskPushNotificationConfig> {
-    throw A2AError.pushNotificationNotSupported();
+    throw new PushNotificationNotSupportedError();
   }
 
   async listTaskPushNotificationConfigs(
-    _params: ListTaskPushNotificationConfigParams,
+    _params: ListTaskPushNotificationConfigsRequest,
     _context?: ServerCallContext,
-  ): Promise<TaskPushNotificationConfig[]> {
-    throw A2AError.pushNotificationNotSupported();
+  ): Promise<ListTaskPushNotificationConfigsResponse> {
+    throw new PushNotificationNotSupportedError();
   }
 
   async deleteTaskPushNotificationConfig(
-    _params: DeleteTaskPushNotificationConfigParams,
+    _params: DeleteTaskPushNotificationConfigRequest,
     _context?: ServerCallContext,
   ): Promise<void> {
-    throw A2AError.pushNotificationNotSupported();
+    throw new PushNotificationNotSupportedError();
+  }
+
+  async listTasks(params: ListTasksRequest, _context?: ServerCallContext): Promise<ListTasksResponse> {
+    const all = this.projector.records()
+      .filter(record => !params.contextId || record.task.contextId === params.contextId)
+      .filter(record => params.status === TaskState.TASK_STATE_UNSPECIFIED || record.task.status?.state === params.status)
+      .filter(record => !params.statusTimestampAfter || (record.task.status?.timestamp ?? '') >= params.statusTimestampAfter);
+    const offset = params.pageToken ? Number(params.pageToken) : 0;
+    const safeOffset = Number.isInteger(offset) && offset > 0 ? offset : 0;
+    const pageSize = Math.min(Math.max(params.pageSize ?? 50, 1), 100);
+    const page = all.slice(safeOffset, safeOffset + pageSize)
+      .map(record => {
+        const task = this.projector.taskWithHistoryLimit(record, params.historyLength);
+        return params.includeArtifacts ? task : { ...task, artifacts: [] };
+      });
+    const nextOffset = safeOffset + page.length;
+    return {
+      tasks: page,
+      nextPageToken: nextOffset < all.length ? String(nextOffset) : '',
+      pageSize,
+      totalSize: all.length,
+    };
   }
 
   async *resubscribe(
-    params: TaskIdParams,
+    params: { id: string },
     _context?: ServerCallContext,
-  ): AsyncGenerator<Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent, void, undefined> {
+  ): AsyncGenerator<StreamResponse, void, undefined> {
     const record = await this.projector.loadByTaskId(params.id);
-    if (!record) throw A2AError.taskNotFound(params.id);
-    yield this.projector.taskWithHistoryLimit(record);
+    if (!record) throw new TaskNotFoundError(`Task not found: ${params.id}`);
+    yield streamResponse('task', this.projector.taskWithHistoryLimit(record));
     for (const event of this.projector.replayableStreamEvents(record)) {
-      yield event;
-      if (event.kind === 'status-update' && event.final) return;
+      yield streamResponseForProjection(event);
+      if (isStoppingStatusUpdate(event)) return;
     }
 
-    if (isTerminalTaskState(record.task.status.state)) return;
+    if (record.task.status && isTerminalTaskState(record.task.status.state)) return;
 
     const subscription = await this.runtime.subscribe(record.correlation.sessionUri);
     for await (const event of subscription.events) {
       for (const projected of await this.projectRuntimeEvent(event)) {
-        yield projected;
-        if (projected.kind === 'status-update' && projected.final) return;
+        yield streamResponseForProjection(projected);
+        if (isStoppingStatusUpdate(projected)) return;
       }
     }
   }
 
-  private async setupTurn(params: MessageSendParams): Promise<{
+  private async setupTurn(params: SendMessageRequest): Promise<{
     record: TaskRecord;
     subscription: Awaited<ReturnType<AhpRuntime['subscribe']>>;
   }> {
     const message = params.message;
-    const taskId = message.taskId ?? randomUUID();
-    const contextId = message.contextId ?? randomUUID();
+    if (!message) throw new RequestMalformedError('message is required');
+    const taskId = message.taskId || randomUUID();
+    const contextId = message.contextId || randomUUID();
     const sessionUri = sessionUriForTask(taskId);
     const stored = await this.projector.loadByTaskId(taskId) ??
       await this.projector.loadByContextId(contextId) ??
@@ -196,6 +237,11 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     const subscription = stored
       ? await this.runtime.resumeSession(sessionOptions)
       : await this.createAndSubscribe(sessionOptions);
+
+    if (this.completePendingInputRequest(record, message)) {
+      await this.projector.save(record);
+      return { record, subscription };
+    }
 
     const turnId = randomUUID();
     record.correlation.activeTurnId = turnId;
@@ -229,7 +275,9 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     this.rememberStatusToolCall(event.sessionUri, event.action);
     const toolResult = await this.executeStatusToolCall(event.sessionUri, event.action);
     if (toolResult) {
-      this.runtime.completeToolCall(event.sessionUri, toolResult.turnId, toolResult.toolCallId, toolResult.result);
+      if (toolResult.result) {
+        this.runtime.completeToolCall(event.sessionUri, toolResult.turnId, toolResult.toolCallId, toolResult.result);
+      }
       return toolResult.events;
     }
     const events = this.projector.projectAction(event.sessionUri, event.action);
@@ -243,7 +291,7 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
   ): Promise<{
     readonly turnId: string;
     readonly toolCallId: string;
-    readonly result: ToolCallResult;
+    readonly result?: ToolCallResult;
     readonly events: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent>;
   } | undefined> {
     const readyAction = action as unknown;
@@ -271,7 +319,17 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
           break;
         case 'request_input':
           events.push(await service.requestInput(input as RequestInputInput));
-          break;
+          this.pendingInputRequests.set(sessionUri, {
+            turnId: readyAction.turnId,
+            toolCallId: readyAction.toolCallId,
+          });
+          this.activeToolCalls.delete(toolCallKey(sessionUri, readyAction.toolCallId));
+          return {
+            turnId: readyAction.turnId,
+            toolCallId: readyAction.toolCallId,
+            events,
+            result: undefined,
+          };
         case 'publish_artifact':
           events.push(await service.publishArtifact(input as PublishArtifactInput));
           break;
@@ -310,9 +368,30 @@ export class A2aAhpRequestHandler implements A2ARequestHandler {
     if (!isToolCallStartAction(startAction) || !isStatusToolName(startAction.toolName)) return;
     this.activeToolCalls.set(toolCallKey(sessionUri, startAction.toolCallId), startAction.toolName);
   }
+
+  private completePendingInputRequest(record: TaskRecord, message: Message): boolean {
+    const pending = this.pendingInputRequests.get(record.correlation.sessionUri);
+    if (!pending) return false;
+
+    const answer = structuredAnswerFromMessage(message, textFromA2aParts(message.parts));
+    this.runtime.completeToolCall(
+      record.correlation.sessionUri,
+      pending.turnId,
+      pending.toolCallId,
+      toolResultFromStructuredAnswer(answer),
+    );
+    this.pendingInputRequests.delete(record.correlation.sessionUri);
+    record.correlation.activeTurnId = pending.turnId;
+    return true;
+  }
 }
 
 type StatusToolName = 'post_status' | 'request_input' | 'publish_artifact' | 'set_activity';
+
+interface PendingInputRequest {
+  readonly turnId: string;
+  readonly toolCallId: string;
+}
 
 interface ToolCallReadyActionLike {
   readonly type: 'session/toolCallReady';
@@ -362,18 +441,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function createAgentCard(overrides: Partial<AgentCard> | undefined): AgentCard {
-  return {
-    protocolVersion: '0.3.0',
+  const base: AgentCard = {
     name: 'A2A AHP Adapter',
     description: 'A2A server-side adapter backed by an AHP client runtime.',
-    url: 'https://localhost/a2a',
-    preferredTransport: 'JSONRPC',
+    supportedInterfaces: [{
+      url: 'https://localhost/a2a',
+      protocolBinding: 'JSONRPC',
+      protocolVersion: '1.0',
+      tenant: '',
+    }],
+    provider: undefined,
     version: '0.1.0',
     capabilities: {
       streaming: true,
-      stateTransitionHistory: true,
       pushNotifications: false,
+      extendedAgentCard: false,
+      extensions: [],
     },
+    securitySchemes: {},
+    securityRequirements: [],
     defaultInputModes: ['text/plain'],
     defaultOutputModes: ['text/plain'],
     skills: [
@@ -382,8 +468,49 @@ function createAgentCard(overrides: Partial<AgentCard> | undefined): AgentCard {
         name: 'A2A to AHP adapter',
         description: 'Forwards A2A tasks into AHP sessions.',
         tags: ['a2a', 'ahp'],
+        examples: [],
+        inputModes: ['text/plain'],
+        outputModes: ['text/plain'],
+        securityRequirements: [],
       },
     ],
+    signatures: [],
+  };
+  return {
+    ...base,
     ...overrides,
+    skills: overrides?.skills ?? base.skills,
+  };
+}
+
+function streamResponseForProjection(event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent): StreamResponse {
+  return eventHasStatus(event)
+    ? streamResponse('statusUpdate', event)
+    : streamResponse('artifactUpdate', event);
+}
+
+function streamResponse<TCase extends NonNullable<StreamResponse['payload']>['$case']>(
+  $case: TCase,
+  value: Extract<NonNullable<StreamResponse['payload']>, { $case: TCase }>['value'],
+): StreamResponse {
+  return { payload: { $case, value } } as StreamResponse;
+}
+
+function isStoppingStatusUpdate(event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent): boolean {
+  return eventHasStatus(event) &&
+    event.status !== undefined &&
+    (isTerminalTaskState(event.status.state) || isInterruptedTaskState(event.status.state));
+}
+
+function eventHasStatus(event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent): event is TaskStatusUpdateEvent {
+  return 'status' in event;
+}
+
+function toolResultFromStructuredAnswer(answer: StructuredAnswer): ToolCallResult {
+  return {
+    success: true,
+    pastTenseMessage: 'Answered request_input',
+    content: [{ type: ToolResultContentType.Text, text: renderStructuredAnswer(answer) }],
+    structuredContent: { answer },
   };
 }

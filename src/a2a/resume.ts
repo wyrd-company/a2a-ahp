@@ -1,4 +1,5 @@
 import type { TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { TaskState } from '@a2a-js/sdk';
 
 import type { AhpRuntime, AhpRuntimeEvent, AhpSessionSubscription } from '../ahp/runtime.js';
 import { errorMessageFromUnknown, isTerminalTaskState } from '../mappers/ahp-to-a2a.js';
@@ -70,7 +71,7 @@ export async function resumeA2aAhpTasks(options: ResumeA2aAhpTasksOptions): Prom
     } catch (error) {
       const event = projector.updateStatus({
         sessionUri: record.correlation.sessionUri,
-        state: 'failed',
+        state: TaskState.TASK_STATE_FAILED,
         text: `A2A task resume failed: ${errorMessageFromUnknown(error)}`,
       });
       await projector.save(record);
@@ -90,7 +91,7 @@ function listOptionsForPolicy(policy: A2aResumePolicy | ResumeTaskPredicate | un
 function shouldResume(record: TaskRecord, policy: A2aResumePolicy | ResumeTaskPredicate | undefined): boolean {
   if (typeof policy === 'function') return policy(record);
   if (policy === 'all') return true;
-  return !isTerminalTaskState(record.task.status.state);
+  return !isTerminalTaskState(record.task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED);
 }
 
 async function drainSubscription(

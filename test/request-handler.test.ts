@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { Message, Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { TaskState, type Message, type Task, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { StateAction } from '@microsoft/agent-host-protocol';
 
-import { A2aAhpRequestHandler, InMemoryA2aTaskStore, sessionUriForTask } from '../src/index.js';
+import {
+  A2aAhpRequestHandler,
+  InMemoryA2aTaskStore,
+  STRUCTURED_ASK_ANSWER_METADATA_KEY,
+  STRUCTURED_ASK_METADATA_KEY,
+  sessionUriForTask,
+} from '../src/index.js';
+import {
+  cancelTaskRequest,
+  sendMessageRequest,
+  statusFromStream,
+  taskFromStream,
+  textFromMessage,
+  userMessage,
+} from './a2a-helpers.js';
 import { FakeAhpRuntime } from './fake-runtime.js';
 
 test('message/send creates an AHP session and dispatches an AHP user turn', async () => {
@@ -12,9 +26,9 @@ test('message/send creates an AHP session and dispatches an AHP user turn', asyn
   const handler = new A2aAhpRequestHandler({ runtime });
   const message = userMessage('task-1', 'ctx-1', 'Hello');
 
-  const result = await handler.sendMessage({ message });
+  const result = await handler.sendMessage(sendMessageRequest(message, { returnImmediately: true }));
 
-  assert.equal((result as Task).kind, 'task');
+  assert.equal((result as Task).id, 'task-1');
   assert.equal(runtime.createdSessions.length, 1);
   assert.equal(runtime.createdSessions[0]?.sessionUri, sessionUriForTask('task-1'));
   assert.equal(runtime.dispatchedTurns.length, 1);
@@ -25,10 +39,7 @@ test('AHP response actions project into a blocking A2A message result', async ()
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
 
-  const pending = handler.sendMessage({
-    message: userMessage('task-2', 'ctx-2', 'Hello'),
-    configuration: { blocking: true },
-  });
+  const pending = handler.sendMessage(sendMessageRequest(userMessage('task-2', 'ctx-2', 'Hello')));
 
   await waitFor(() => runtime.dispatchedTurns.length === 1);
   const dispatch = runtime.dispatchedTurns[0]!;
@@ -37,21 +48,17 @@ test('AHP response actions project into a blocking A2A message result', async ()
   runtime.emit(dispatch.sessionUri, turnComplete(dispatch.turnId));
 
   const result = await pending;
-  assert.equal((result as Message).kind, 'message');
-  assert.equal((result as Message).role, 'agent');
-  const part = (result as Message).parts[0];
-  assert.equal(part?.kind, 'text');
-  assert.equal(part?.kind === 'text' ? part.text : '', 'Hello from AHP');
+  assert.equal(textFromMessage(result as Message), 'Hello from AHP');
 });
 
 test('message/stream yields projected updates from AHP session actions', async () => {
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
-  const stream = handler.sendMessageStream({ message: userMessage('task-3', 'ctx-3', 'Stream') });
+  const stream = handler.sendMessageStream(sendMessageRequest(userMessage('task-3', 'ctx-3', 'Stream')));
 
   const first = await stream.next();
   assert.equal(first.done, false);
-  assert.equal((first.value as Task).kind, 'task');
+  assert.equal(taskFromStream(first.value)?.id, 'task-3');
 
   await waitFor(() => runtime.dispatchedTurns.length === 1);
   const dispatch = runtime.dispatchedTurns[0]!;
@@ -59,19 +66,20 @@ test('message/stream yields projected updates from AHP session actions', async (
   runtime.emit(dispatch.sessionUri, delta(dispatch.turnId, 'chunk'));
   runtime.emit(dispatch.sessionUri, turnComplete(dispatch.turnId));
 
-  const events: Array<TaskStatusUpdateEvent | TaskArtifactUpdateEvent> = [];
+  const statuses: TaskStatusUpdateEvent[] = [];
   for await (const event of stream) {
-    if (event.kind !== 'task' && event.kind !== 'message') events.push(event);
+    const status = statusFromStream(event);
+    if (status) statuses.push(status);
   }
 
-  assert.ok(events.some(event => event.kind === 'status-update' && event.status.state === 'working'));
-  assert.ok(events.some(event => event.kind === 'status-update' && event.status.state === 'completed' && event.final));
+  assert.ok(statuses.some(event => event.status?.state === TaskState.TASK_STATE_WORKING));
+  assert.ok(statuses.some(event => event.status?.state === TaskState.TASK_STATE_COMPLETED));
 });
 
 test('tasks/get returns the local projected task state with history limit', async () => {
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
-  await handler.sendMessage({ message: userMessage('task-4', 'ctx-4', 'Hello') });
+  await handler.sendMessage(sendMessageRequest(userMessage('task-4', 'ctx-4', 'Hello'), { returnImmediately: true }));
 
   const task = await handler.getTask({ id: 'task-4', historyLength: 1 });
 
@@ -82,23 +90,23 @@ test('tasks/get returns the local projected task state with history limit', asyn
 test('tasks/cancel dispatches cancellation and updates projection', async () => {
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
-  await handler.sendMessage({ message: userMessage('task-5', 'ctx-5', 'Cancel') });
+  await handler.sendMessage(sendMessageRequest(userMessage('task-5', 'ctx-5', 'Cancel'), { returnImmediately: true }));
 
-  const task = await handler.cancelTask({ id: 'task-5' });
+  const task = await handler.cancelTask(cancelTaskRequest('task-5'));
 
   assert.equal(runtime.canceledTurns.length, 1);
-  assert.equal(task.status.state, 'canceled');
+  assert.equal(task.status?.state, TaskState.TASK_STATE_CANCELED);
 });
 
 test('tasks/resubscribe streams future projected events', async () => {
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
-  await handler.sendMessage({ message: userMessage('task-6', 'ctx-6', 'Resume') });
+  await handler.sendMessage(sendMessageRequest(userMessage('task-6', 'ctx-6', 'Resume'), { returnImmediately: true }));
 
   const stream = handler.resubscribe({ id: 'task-6' });
   const initial = await stream.next();
   assert.equal(initial.done, false);
-  assert.equal((initial.value as Task).id, 'task-6');
+  assert.equal(taskFromStream(initial.value)?.id, 'task-6');
 
   const dispatch = runtime.dispatchedTurns[0]!;
   const completedPromise = stream.next();
@@ -107,7 +115,7 @@ test('tasks/resubscribe streams future projected events', async () => {
   const completed = await completedPromise;
 
   assert.equal(completed.done, false);
-  assert.equal((completed.value as TaskStatusUpdateEvent).status.state, 'completed');
+  assert.equal(statusFromStream(completed.value)?.status?.state, TaskState.TASK_STATE_COMPLETED);
 });
 
 test('tasks/get hydrates task projection from a durable task store', async () => {
@@ -118,7 +126,7 @@ test('tasks/get hydrates task projection from a durable task store', async () =>
     taskStore: store,
     route: { provider: 'provider-a', model: { id: 'model-a' } },
   });
-  await writer.sendMessage({ message: userMessage('task-store-1', 'ctx-store-1', 'Persist') });
+  await writer.sendMessage(sendMessageRequest(userMessage('task-store-1', 'ctx-store-1', 'Persist'), { returnImmediately: true }));
 
   const reader = new A2aAhpRequestHandler({ runtime: new FakeAhpRuntime(), taskStore: store });
   const task = await reader.getTask({ id: 'task-store-1' });
@@ -138,11 +146,11 @@ test('message/send to an existing durable task resumes the AHP session instead o
     taskStore: store,
     route: { provider: 'provider-a', model: { id: 'model-a' } },
   });
-  await writer.sendMessage({ message: userMessage('task-store-resume', 'ctx-store-resume', 'First') });
+  await writer.sendMessage(sendMessageRequest(userMessage('task-store-resume', 'ctx-store-resume', 'First'), { returnImmediately: true }));
 
   const runtime = new FakeAhpRuntime();
   const reader = new A2aAhpRequestHandler({ runtime, taskStore: store });
-  await reader.sendMessage({ message: userMessage('task-store-resume', 'ctx-store-resume', 'Second') });
+  await reader.sendMessage(sendMessageRequest(userMessage('task-store-resume', 'ctx-store-resume', 'Second'), { returnImmediately: true }));
 
   assert.equal(runtime.createdSessions.length, 0);
   assert.equal(runtime.resumedSessions.length, 1);
@@ -156,7 +164,7 @@ test('tasks/resubscribe replays persisted stream updates before future events', 
   const store = new InMemoryA2aTaskStore();
   const runtime = new FakeAhpRuntime();
   const writer = new A2aAhpRequestHandler({ runtime, taskStore: store });
-  const stream = writer.sendMessageStream({ message: userMessage('task-store-2', 'ctx-store-2', 'Stream persist') });
+  const stream = writer.sendMessageStream(sendMessageRequest(userMessage('task-store-2', 'ctx-store-2', 'Stream persist')));
 
   await stream.next();
   await waitFor(() => runtime.dispatchedTurns.length === 1);
@@ -173,70 +181,110 @@ test('tasks/resubscribe replays persisted stream updates before future events', 
   const replay = await resumed.next();
 
   assert.equal(task.done, false);
-  assert.equal((task.value as Task).id, 'task-store-2');
+  assert.equal(taskFromStream(task.value)?.id, 'task-store-2');
   assert.equal(replay.done, false);
-  assert.equal((replay.value as TaskStatusUpdateEvent).kind, 'status-update');
-  assert.equal((replay.value as TaskStatusUpdateEvent).status.state, 'working');
+  assert.equal(statusFromStream(replay.value)?.status?.state, TaskState.TASK_STATE_WORKING);
 });
 
 test('active-client status tool calls update projection and complete through AHP', async () => {
   const runtime = new FakeAhpRuntime();
   const handler = new A2aAhpRequestHandler({ runtime });
-  const stream = handler.sendMessageStream({ message: userMessage('task-7', 'ctx-7', 'Tool status') });
+  const stream = handler.sendMessageStream(sendMessageRequest(userMessage('task-7', 'ctx-7', 'Tool status')));
 
   const initial = await stream.next();
   assert.equal(initial.done, false);
   await waitFor(() => runtime.dispatchedTurns.length === 1);
   const dispatch = runtime.dispatchedTurns[0]!;
 
-  runtime.emit(dispatch.sessionUri, {
-    type: 'session/toolCallStart',
-    turnId: dispatch.turnId,
-    toolCallId: 'tool-call-1',
-    toolName: 'post_status',
-    displayName: 'Post Status',
-    contributor: { kind: 'client', clientId: 'a2a-ahp-test' },
-  } as StateAction);
-  runtime.emit(dispatch.sessionUri, {
-    type: 'session/toolCallReady',
-    turnId: dispatch.turnId,
-    toolCallId: 'tool-call-1',
-    invocationMessage: 'Post Status',
-    toolInput: JSON.stringify({ state: 'working', message: 'Installing dependencies' }),
-    confirmed: 'not-needed',
-  } as StateAction);
+  emitToolCall(runtime, dispatch, 'tool-call-1', 'post_status', { state: 'working', message: 'Installing dependencies' });
 
   let update = await stream.next();
-  while (
-    !update.done &&
-    !(
-      (update.value as TaskStatusUpdateEvent).kind === 'status-update' &&
-      (update.value as TaskStatusUpdateEvent).status.message?.parts[0]?.kind === 'text'
-    )
-  ) {
+  let status = update.done ? undefined : statusFromStream(update.value);
+  while (!update.done && textFromMessage(status?.status?.message) === '') {
     update = await stream.next();
+    status = update.done ? undefined : statusFromStream(update.value);
   }
 
   assert.equal(update.done, false);
-  assert.equal((update.value as TaskStatusUpdateEvent).status.state, 'working');
-  const message = (update.value as TaskStatusUpdateEvent).status.message;
-  assert.equal(message?.parts[0]?.kind, 'text');
-  assert.equal(message?.parts[0]?.kind === 'text' ? message.parts[0].text : '', 'Installing dependencies');
+  assert.equal(status?.status?.state, TaskState.TASK_STATE_WORKING);
+  assert.equal(textFromMessage(status?.status?.message), 'Installing dependencies');
   assert.equal(runtime.completedToolCalls.length, 1);
   assert.equal(runtime.completedToolCalls[0]?.toolCallId, 'tool-call-1');
   assert.equal(runtime.completedToolCalls[0]?.result.success, true);
 });
 
-function userMessage(taskId: string, contextId: string, text: string): Message {
-  return {
-    kind: 'message',
-    role: 'user',
-    messageId: `${taskId}-message`,
-    taskId,
-    contextId,
-    parts: [{ kind: 'text', text }],
-  };
-}
+test('request_input with options emits INPUT_REQUIRED with structured ask metadata', async () => {
+  const runtime = new FakeAhpRuntime();
+  const handler = new A2aAhpRequestHandler({ runtime });
+  const stream = handler.sendMessageStream(sendMessageRequest(userMessage('task-ask-1', 'ctx-ask-1', 'Ask')));
+
+  await stream.next();
+  await waitFor(() => runtime.dispatchedTurns.length === 1);
+  const dispatch = runtime.dispatchedTurns[0]!;
+
+  emitToolCall(runtime, dispatch, 'tool-call-ask-1', 'request_input', {
+    prompt: 'Choose one',
+    options: [{ id: 'approve', label: 'Approve', description: 'Continue' }],
+    allowFreeText: false,
+    role: 'reviewer',
+  });
+
+  const status = await nextStatusWithState(stream, TaskState.TASK_STATE_INPUT_REQUIRED);
+
+  assert.equal(status.status?.state, TaskState.TASK_STATE_INPUT_REQUIRED);
+  assert.deepEqual(status?.metadata?.[STRUCTURED_ASK_METADATA_KEY], {
+    prompt: 'Choose one',
+    options: [{ id: 'approve', label: 'Approve', description: 'Continue' }],
+    allowFreeText: false,
+    role: 'reviewer',
+  });
+  assert.equal(runtime.completedToolCalls.length, 0);
+});
+
+test('request_input answer metadata resolves pending tool call with optionId', async () => {
+  const runtime = new FakeAhpRuntime();
+  const handler = new A2aAhpRequestHandler({ runtime });
+  const stream = handler.sendMessageStream(sendMessageRequest(userMessage('task-ask-2', 'ctx-ask-2', 'Ask')));
+
+  await stream.next();
+  await waitFor(() => runtime.dispatchedTurns.length === 1);
+  const dispatch = runtime.dispatchedTurns[0]!;
+  emitToolCall(runtime, dispatch, 'tool-call-ask-2', 'request_input', { prompt: 'Choose one' });
+  await nextStatusWithState(stream, TaskState.TASK_STATE_INPUT_REQUIRED);
+
+  await handler.sendMessage(sendMessageRequest(
+    userMessage('task-ask-2', 'ctx-ask-2', 'Approved', {
+      [STRUCTURED_ASK_ANSWER_METADATA_KEY]: { optionId: 'approve' },
+    }),
+    { returnImmediately: true },
+  ));
+
+  assert.equal(runtime.completedToolCalls.length, 1);
+  assert.equal(runtime.completedToolCalls[0]?.toolCallId, 'tool-call-ask-2');
+  assert.deepEqual(runtime.completedToolCalls[0]?.result.structuredContent, { answer: { optionId: 'approve' } });
+  assert.equal(toolResultText(runtime.completedToolCalls[0]?.result), 'Selected option: approve');
+});
+
+test('plain-text request_input answer resolves pending tool call with text', async () => {
+  const runtime = new FakeAhpRuntime();
+  const handler = new A2aAhpRequestHandler({ runtime });
+  const stream = handler.sendMessageStream(sendMessageRequest(userMessage('task-ask-3', 'ctx-ask-3', 'Ask')));
+
+  await stream.next();
+  await waitFor(() => runtime.dispatchedTurns.length === 1);
+  const dispatch = runtime.dispatchedTurns[0]!;
+  emitToolCall(runtime, dispatch, 'tool-call-ask-3', 'request_input', { prompt: 'Tell me' });
+  await nextStatusWithState(stream, TaskState.TASK_STATE_INPUT_REQUIRED);
+
+  await handler.sendMessage(sendMessageRequest(
+    userMessage('task-ask-3', 'ctx-ask-3', 'Plain answer'),
+    { returnImmediately: true },
+  ));
+
+  assert.equal(runtime.completedToolCalls.length, 1);
+  assert.deepEqual(runtime.completedToolCalls[0]?.result.structuredContent, { answer: { text: 'Plain answer' } });
+  assert.equal(toolResultText(runtime.completedToolCalls[0]?.result), 'Plain answer');
+});
 
 function responsePart(turnId: string): StateAction {
   return {
@@ -262,10 +310,55 @@ function turnComplete(turnId: string): StateAction {
   } as StateAction;
 }
 
+function emitToolCall(
+  runtime: FakeAhpRuntime,
+  dispatch: { sessionUri: string; turnId: string },
+  toolCallId: string,
+  toolName: string,
+  toolInput: unknown,
+): void {
+  runtime.emit(dispatch.sessionUri, {
+    type: 'session/toolCallStart',
+    turnId: dispatch.turnId,
+    toolCallId,
+    toolName,
+    displayName: toolName,
+    contributor: { kind: 'client', clientId: 'a2a-ahp-test' },
+  } as StateAction);
+  runtime.emit(dispatch.sessionUri, {
+    type: 'session/toolCallReady',
+    turnId: dispatch.turnId,
+    toolCallId,
+    invocationMessage: toolName,
+    toolInput: JSON.stringify(toolInput),
+    confirmed: 'not-needed',
+  } as StateAction);
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 1_000;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error('condition was not met before timeout');
     await new Promise(resolve => setTimeout(resolve, 5));
   }
+}
+
+async function nextStatusWithState(
+  stream: AsyncGenerator<import('@a2a-js/sdk').StreamResponse, void, undefined>,
+  state: TaskState,
+): Promise<TaskStatusUpdateEvent> {
+  for await (const response of stream) {
+    const status = statusFromStream(response);
+    if (status?.status?.state === state) return status;
+  }
+  throw new Error(`stream ended before status ${state}`);
+}
+
+function toolResultText(result: { content?: readonly unknown[] } | undefined): string {
+  const first = result?.content?.[0];
+  return isTextContent(first) ? first.text : '';
+}
+
+function isTextContent(value: unknown): value is { text: string } {
+  return typeof value === 'object' && value !== null && 'text' in value && typeof value.text === 'string';
 }

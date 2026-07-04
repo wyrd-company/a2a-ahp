@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { TaskState } from '@a2a-js/sdk';
 import type { StateAction } from '@microsoft/agent-host-protocol';
 
 import {
@@ -9,6 +10,7 @@ import {
   TaskProjector,
   type ResumeSessionOptions,
 } from '../src/index.js';
+import { textFromMessage } from './a2a-helpers.js';
 import { FakeAhpRuntime } from './fake-runtime.js';
 
 test('resumeA2aAhpTasks resumes non-terminal durable task sessions with original route identity', async () => {
@@ -74,8 +76,7 @@ test('resumeA2aAhpTasks projects live events from resumed subscriptions into the
 
   await waitFor(async () => {
     const saved = await store.getByTaskId('task-resume-3');
-    return saved?.task.status.message?.parts[0]?.kind === 'text' &&
-      saved.task.status.message.parts[0].text === 'resumed text';
+    return textFromMessage(saved?.task.status?.message) === 'resumed text';
   });
 });
 
@@ -97,11 +98,8 @@ test('resumeA2aAhpTasks marks resume failures as durable failed task state', asy
 
   assert.equal(result.resumed.length, 0);
   assert.equal(result.failed.length, 1);
-  assert.equal(saved?.task.status.state, 'failed');
-  assert.match(
-    saved?.task.status.message?.parts[0]?.kind === 'text' ? saved.task.status.message.parts[0].text : '',
-    /AHP session cannot be resumed/,
-  );
+  assert.equal(saved?.task.status?.state, TaskState.TASK_STATE_FAILED);
+  assert.match(textFromMessage(saved?.task.status?.message), /AHP session cannot be resumed/);
 });
 
 class FailingResumeRuntime extends FakeAhpRuntime {

@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate release intent state
-        uses: wyrd-company/intentional@0.1.6
+        uses: wyrd-company/intentional@0.1.8
         with:
           command: check
           intentional-version: 0.1.6
